@@ -1,0 +1,93 @@
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from "@nestjs/common";
+import Database from "better-sqlite3";
+import * as fs from "fs";
+import * as path from "path";
+import { SERVICE_CONFIG } from "../config/config";
+import type { ServiceConfig } from "../config/config";
+
+export type Db = Database.Database;
+
+/**
+ * Owns the shared SQLite connection and the fragmenter's own migrations.
+ *
+ * The fragmenter NEVER creates or alters orchestrator-owned tables. Per
+ * v5 contract `apps/context-fragmenter.md`, table-level ownership is:
+ *
+ * - Orchestrator-owned: `sessions`, `messages`, `agent_events`,
+ *   `agent_plans`, `agent_plan_steps`, `personas`, `persona_*`,
+ *   `identity_mutation_candidates`. The fragmenter may read these.
+ * - Fragmenter-owned: every table prefixed `fragmenter_*`. The
+ *   fragmenter is the only writer for these.
+ */
+@Injectable()
+export class DatabaseService implements OnModuleInit, OnModuleDestroy {
+  private readonly log = new Logger(DatabaseService.name);
+  private db?: Db;
+
+  constructor(@Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig) {}
+
+  onModuleInit(): void {
+    const file = this.cfg.database.file;
+    const dir = path.dirname(file);
+    fs.mkdirSync(dir, { recursive: true });
+
+    if (!fs.existsSync(file)) {
+      this.log.warn(
+        `SQLite file ${file} does not exist yet. Creating it; the orchestrator will populate its tables on first run.`,
+      );
+    }
+
+    this.db = new Database(file);
+    // WAL mode is set by the orchestrator. We pragma it for safety in case
+    // the fragmenter is the first process to open the file.
+    this.db.pragma("journal_mode = WAL");
+    // Foreign keys are deliberately NOT enabled for this connection. The
+    // fragmenter's tables hold opaque sessionIds; cleanup of fragmenter
+    // rows is driven by the explicit `session.invalidate` notification,
+    // not by SQLite cascade from the orchestrator's `sessions` table.
+    this.migrate();
+    this.log.log(`SQLite ready at ${file}`);
+  }
+
+  onModuleDestroy(): void {
+    this.db?.close();
+  }
+
+  get connection(): Db {
+    if (!this.db) throw new Error("Database not initialized");
+    return this.db;
+  }
+
+  private migrate(): void {
+    this.connection.exec(`
+      CREATE TABLE IF NOT EXISTS fragmenter_session_summaries (
+        session_id TEXT PRIMARY KEY,
+        summary TEXT NOT NULL,
+        through_seq INTEGER NOT NULL,
+        through_message_id TEXT,
+        generated_at TEXT NOT NULL,
+        fragmenter_correlation_id TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS fragmenter_consolidation_runs (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        through_seq INTEGER,
+        error_message TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_fragmenter_runs_session
+        ON fragmenter_consolidation_runs(session_id, started_at);
+    `);
+  }
+}
