@@ -62,6 +62,7 @@ export class SessionSummaryService {
   async run(sessionId: string): Promise<SessionSummaryRunResult> {
     const runId = randomUUID();
     const startedAt = new Date().toISOString();
+    this.log.log(`session.summary run started for ${sessionId} (runId=${runId})`);
 
     this.recordRunStart(runId, sessionId, startedAt);
 
@@ -120,6 +121,9 @@ export class SessionSummaryService {
       summaryText = result.text.trim();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      this.log.warn(
+        `session.summary run failed for ${sessionId}: ${message}`,
+      );
       this.recordRunFailure(runId, message);
       return {
         sessionId,

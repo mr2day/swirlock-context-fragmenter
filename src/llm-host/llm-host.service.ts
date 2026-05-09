@@ -179,7 +179,11 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
               request: {
                 requestContext: {
                   callerService: this.cfg.llmHost.callerService,
-                  priority: "background",
+                  // Priority is intentionally omitted: domain services use the
+                  // string scale (interactive/background/maintenance), while
+                  // Model Host queues on numeric priorities. The Fragmenter
+                  // is the only consumer of its LLM host, so queue ordering
+                  // is moot here and we let the host apply its own default.
                   requestedAt: new Date().toISOString(),
                   timeoutMs,
                 },

@@ -71,11 +71,15 @@ export class ConsolidationScheduler implements OnModuleDestroy {
     observedAt: string;
   }): void {
     if (this.destroyed) return;
-    if (!this.summary.shouldRun(args.sessionId, args.lastSeq)) {
-      return;
-    }
+    const shouldRun = this.summary.shouldRun(args.sessionId, args.lastSeq);
+    this.log.log(
+      `notifyObserved sessionId=${args.sessionId} lastSeq=${args.lastSeq} shouldRun=${shouldRun}`,
+    );
+    if (!shouldRun) return;
     this.enqueue(args);
-    void this.drain();
+    void this.drain().catch((err: Error) => {
+      this.log.error(`drain crashed: ${err.message}`, err.stack);
+    });
   }
 
   notifyInvalidated(sessionId: string): void {
