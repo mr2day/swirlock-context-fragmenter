@@ -148,6 +148,75 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       "reinforcement_count",
       "INTEGER NOT NULL DEFAULT 1",
     );
+
+    // Unit K: per-cutoff session summaries. The original schema had
+    // session_id as the sole PK, so only one summary per session
+    // could exist — every new run overwrote the prior one and the
+    // orchestrator had no way to fetch a summary that ends BEFORE
+    // its raw hot-zone starts (which created overlap). The new
+    // schema uses a composite PK (session_id, through_seq) so
+    // multiple cutoffs accumulate over time; the orchestrator picks
+    // the largest through_seq strictly less than its hot-zone-start
+    // seq.
+    this.migrateSummariesToCompositeKey();
+  }
+
+  /**
+   * Migrates fragmenter_session_summaries from a single-row-per-session
+   * shape (session_id PK) to a multi-cutoff shape (session_id + through_seq
+   * composite PK). Idempotent — runs once, detected by checking whether
+   * session_id is currently UNIQUE on the existing table.
+   *
+   * SQLite doesn't support DROP PRIMARY KEY on an existing table, so the
+   * migration uses the standard table-swap pattern: create the new
+   * table, copy rows, drop the old table, rename. Safe because the
+   * fragmenter holds an exclusive WAL connection during onModuleInit.
+   */
+  private migrateSummariesToCompositeKey(): void {
+    const tableExists = this.connection
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'fragmenter_session_summaries'`,
+      )
+      .get() as { name: string } | undefined;
+    if (!tableExists) return;
+
+    // Detect whether the table is already on the new shape by
+    // counting how many PK columns it has. If pk > 1, we're on the
+    // composite PK already — nothing to do.
+    const cols = this.connection
+      .prepare(`PRAGMA table_info(fragmenter_session_summaries)`)
+      .all() as Array<{ name: string; pk: number }>;
+    const pkCount = cols.filter((c) => c.pk > 0).length;
+    if (pkCount >= 2) return;
+
+    this.log.log(
+      "Migrating fragmenter_session_summaries to composite PK (session_id, through_seq)",
+    );
+
+    this.connection.exec(`
+      CREATE TABLE fragmenter_session_summaries_new (
+        session_id TEXT NOT NULL,
+        through_seq INTEGER NOT NULL,
+        summary TEXT NOT NULL,
+        through_message_id TEXT,
+        generated_at TEXT NOT NULL,
+        fragmenter_correlation_id TEXT,
+        PRIMARY KEY (session_id, through_seq)
+      );
+
+      INSERT INTO fragmenter_session_summaries_new
+        (session_id, through_seq, summary, through_message_id, generated_at, fragmenter_correlation_id)
+      SELECT session_id, through_seq, summary, through_message_id, generated_at, fragmenter_correlation_id
+        FROM fragmenter_session_summaries;
+
+      DROP TABLE fragmenter_session_summaries;
+
+      ALTER TABLE fragmenter_session_summaries_new
+        RENAME TO fragmenter_session_summaries;
+
+      CREATE INDEX IF NOT EXISTS idx_fragmenter_summaries_session_seq
+        ON fragmenter_session_summaries(session_id, through_seq);
+    `);
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {

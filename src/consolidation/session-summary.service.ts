@@ -178,11 +178,16 @@ export class SessionSummaryService {
   }
 
   private loadSummary(sessionId: string): SummaryRow | null {
+    // Unit K: a session may now have multiple summaries at different
+    // through_seq cutoffs. shouldRun() and run() care about progress
+    // since the LAST summary written, so we pick the most recent one.
     const row = this.db.connection
       .prepare(
         `SELECT session_id, summary, through_seq, through_message_id, generated_at
            FROM fragmenter_session_summaries
-          WHERE session_id = ?`,
+          WHERE session_id = ?
+          ORDER BY through_seq DESC
+          LIMIT 1`,
       )
       .get(sessionId) as SummaryRow | undefined;
     return row ?? null;
@@ -226,14 +231,18 @@ export class SessionSummaryService {
     generatedAt: string;
     correlationId: string;
   }): void {
+    // Unit K: each run inserts a NEW row (one cutoff per through_seq).
+    // The composite PK is (session_id, through_seq), so the same
+    // through_seq twice is a re-summarisation of the same cutoff —
+    // overwrite it via DO UPDATE. Different through_seq values
+    // accumulate as additional cutoffs available to the orchestrator.
     this.db.connection
       .prepare(
         `INSERT INTO fragmenter_session_summaries
            (session_id, summary, through_seq, through_message_id, generated_at, fragmenter_correlation_id)
          VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(session_id) DO UPDATE SET
+         ON CONFLICT(session_id, through_seq) DO UPDATE SET
            summary = excluded.summary,
-           through_seq = excluded.through_seq,
            through_message_id = excluded.through_message_id,
            generated_at = excluded.generated_at,
            fragmenter_correlation_id = excluded.fragmenter_correlation_id`,
