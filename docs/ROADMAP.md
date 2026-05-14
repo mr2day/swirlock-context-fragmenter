@@ -35,7 +35,7 @@ memory; the RAG Engine is the *outward-looking* counterpart.
 | Fragmenter → orchestrator notifications | done | optional `consolidation.updated` |
 | Orchestrator reads fragmenter tables | done | `FragmenterReaderService`, plain SQL on shared SQLite |
 | Fragmented-context block in prompt | partial | injected as a system message; no per-query relevance selection yet — everything active gets dumped |
-| Repeatability-driven decay | planned | applies to both identity and (future) lessons |
+| Repeatability-driven decay | done | applies to identity facts; same mechanism will apply to (future) lessons |
 | Reality-drift gate (Layer 1 + 2) | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
 | Reality-drift spot-check + audits | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
 | Appeal pass | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
