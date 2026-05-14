@@ -118,8 +118,12 @@ The prompt is roughly:
 > between named entities, AND those claims are not visibly grounded in
 > sources cited inside this same message. Conversational pleasantries,
 > opinions, self-descriptions, generic explanations, and clearly
-> hypothetical statements are not audit-worthy. Answer in any
-> language; the underlying message can be in any language.
+> hypothetical statements are not audit-worthy. If the assistant
+> itself signals uncertainty about any claim — phrases of the shape
+> "I'm not sure", "I might be wrong", "I think", or any equivalent
+> in any language — set `audit_worthy: true` regardless of the other
+> criteria. Answer in any language; the underlying message can be in
+> any language.
 
 The model is told to be conservative — false positives just waste
 search budget on Layer 3, while false negatives let bad memories form
@@ -140,8 +144,13 @@ sleep). The job:
    shaped as
    `{ claim: string, anchor_terms: string[], stake: "low"|"medium"|"high" }`.
    "Anchor terms" are the search-ready substrings for that claim.
-2. **Spot-checks each anchor.** Run an Exa search per anchor
-   (`extractLimit: 1–2`). Use cleaned highlights as evidence.
+2. **Spot-checks each anchor.** Sends a `search.run` request to the
+   RAG Engine over a persistent WebSocket at `/v5/retrieval`. This
+   is a new peer relationship for the Fragmenter (its first non-LLM
+   peer) and a new additive message type on the RAG Engine — the
+   Fragmenter never opens its own Exa client. The RAG Engine
+   returns cleaned highlights without its usual full-pipeline
+   evidence-packaging steps. `extractLimit` per anchor: 1–2.
 3. **Adjudicates each claim.** One Utility LLM call per claim with
    `{claim, retrieved evidence}` → verdict:
    - `verified` — evidence clearly supports the claim
@@ -160,6 +169,42 @@ Hard-capped per session per day to prevent budget runaway.
 not want to write a memory that says "I hallucinated X" when the
 truth is just "I couldn't find a source for X". The two have very
 different lessons.
+
+### Appeal pass (automated second opinion)
+
+A separate sleep-time pass re-checks every audit whose verdict was
+`hallucinated` or `suspect`, exactly once. `clean` verdicts are
+never appealed. The appeal is the Fragmenter's automated stand-in
+for a human-dispute mechanism — instead of asking the user "was this
+audit correct?", we ask a fresh LLM pass with deliberately different
+framing to argue against the original verdict.
+
+To make the appeal a genuine second opinion (not a rubber stamp),
+two things vary from the original audit:
+
+- **Adversarial query rephrasing.** The LLM generates fresh search
+  queries oriented toward *contradicting or invalidating* the
+  original claim — negations, broadened entity context, alternative
+  spellings, related-but-different framings. Queries that just
+  rephrase the original supportive ones are rejected.
+- **Adversarial adjudication framing.** Where the original
+  adjudication prompt asked "does this evidence support the
+  claim?", the appeal asks "what is the strongest case that this
+  claim is wrong, mistaken, or unsupported by reliable sources? If
+  such a case exists, output it; otherwise concede the original
+  verdict stands."
+
+Bounded depth: exactly one appeal per audit, ever. No
+appeals-of-appeals. If the appeal contradicts the original, the
+audit row's `disputed` flag is set and the audit is excluded from
+all downstream lesson reinforcement. If the appeal confirms, the
+audit stands and feeds `experience.distillation` normally.
+
+Cost: one extra search round + one extra adjudication LLM call per
+appealed audit. Since `clean` audits are not appealed and should be
+the majority, the appeal pass roughly doubles the cost of
+action-worthy audits but leaves the overall system cost modestly
+higher, not 2×.
 
 ## Storage model
 
@@ -181,10 +226,12 @@ what we found, what verdict we reached.
 | persona_name | TEXT | which persona generated the answer |
 | occurred_at | TEXT (ISO) | when the original answer streamed |
 | audited_at | TEXT (ISO) | when the audit ran |
-| markers_triggered | JSON | which heuristics fired (debugging) |
+| markers_triggered | JSON | which gate signals fired (Layer 1 counts + Layer 2 `why`) for debugging |
 | claims_checked | JSON | array of `{claim, anchor_terms, retrieved_evidence_url, verdict, evidence_excerpt}` |
 | turn_verdict | TEXT | `hallucinated` / `suspect` / `clean` |
 | corrected_summary | TEXT | short prose: "I claimed X. Reality says Y." Nullable when verdict = clean. |
+| appealed_at | TEXT (ISO) | when the appeal pass ran (NULL until appealed; `clean` audits stay NULL forever) |
+| disputed | BOOLEAN | TRUE if the appeal pass contradicted the original verdict; excluded from lesson reinforcement |
 | fragmenter_correlation_id | TEXT | for tracing |
 
 Audits are append-only. They are not consumed at prompt time
@@ -199,7 +246,7 @@ the persona's identity.
 | column | type | notes |
 | --- | --- | --- |
 | id | TEXT PK (uuid) | |
-| persona_name | TEXT | scoped per persona; `user_id` could be added if we want per-user lessons |
+| persona_name | TEXT | scoped per persona, always — no per-user variant in the MVP (decision recorded; see History below) |
 | content | TEXT | the lesson sentence, third-person about the assistant |
 | importance | TEXT | `core` / `important` / `incidental` |
 | source_audit_ids | JSON | array of audit ids the lesson was derived from |
@@ -225,19 +272,39 @@ between `session.summary` and identity extraction:
 
 ```
 session.observed
-  → session.summary       (existing)
-  → answer.reality_check  (new, only if last assistant message passes the gate)
+  → session.summary           (existing)
+  → answer.reality_check      (new, only if last assistant message passes the Layer-1 + Layer-2 gate)
   → identity.user / identity.app   (existing)
 sleep tick (every N min)
-  → identity merges       (existing)
-  → experience.distillation (new, runs after identity merges)
+  → identity merges                (existing)
+  → answer.audit_appeal            (new, re-checks `hallucinated`/`suspect` audits not yet appealed)
+  → experience.distillation        (new, runs after appeals so disputed audits are excluded)
 ```
 
 The `experience.distillation` pass groups recent `hallucinated` and
-`suspect` audits for a persona, asks the Utility LLM to abstract
-them into behavioural lessons, and writes new
-`fragmenter_experience_lessons` rows. Subsequent sleep ticks merge
-near-duplicates the same way identity rows are merged.
+`suspect` audits (excluding ones flipped to `disputed` by the appeal
+pass) for a persona, asks the Utility LLM to abstract them into
+behavioural lessons, and writes or reinforces
+`fragmenter_experience_lessons` rows.
+
+Reinforcement and decay are **driven by repeatability, not by
+calendar time** (decision Q4):
+
+- For each new audit cluster, the distillation step similarity-matches
+  against every existing active lesson for the same persona — one
+  Utility-LLM call shaped roughly "does this audit reinforce any of
+  the following existing lessons? If yes, which ones?". A reinforced
+  lesson gets `last_confirmed_at` bumped and, after N reinforcements,
+  may be promoted one importance tier.
+- For each existing active lesson with **no matching new audit for K
+  consecutive sleep ticks**, importance is demoted one tier. A lesson
+  already at `incidental` that fails to be reinforced for K more
+  ticks is retired by setting `superseded_at`.
+
+Time alone never decays a lesson. Only the *absence of fresh
+reinforcing audits* does. A lesson the assistant keeps proving by
+making the same kind of mistake stays core; a one-off that never
+recurs eventually retires itself.
 
 ## Prompt-time consumption
 
@@ -280,39 +347,75 @@ decision in the right direction next time. That closes the loop:
 The audit must always run on `maintenance` priority on its own LLM
 host queue. It must never block the user-facing turn.
 
-## Open questions
+## Decision history
 
-1. **Search provider.** Today the RAG Engine owns the Exa
-   integration. The Fragmenter does not currently talk to Exa.
-   Options: (a) duplicate the Exa client in the fragmenter, (b) the
-   RAG Engine grows a thin "search-only" capability the Fragmenter
-   can call, (c) move the Exa client to a shared library both apps
-   import. (c) is cleanest but a bigger refactor.
-2. **Per-user vs per-persona lessons.** Right now we propose
-   per-persona lessons only. Is "Gigi tends to hallucinate Romanian
-   crime details when talking to *Nick*" interesting enough to be
-   per-user? Probably not in the MVP. Revisit when we have multiple
-   users with diverging conversation profiles.
-3. **Self-flagged uncertainty as auto-audit trigger.** If the bot
-   itself says "I'm not 100% sure" or "I might be wrong about this"
-   mid-answer, should that automatically promote the turn to
-   audit-worthy regardless of what the Layer-2 LLM gate decides?
-   Probably yes — it is the cheapest, most reliable hallucination
-   signal — but it shares the same language-coverage problem the
-   structural pre-filter solves by avoiding. Best handled by adding
-   the cue to the Layer-2 gate prompt explicitly ("treat
-   self-flagged uncertainty as audit-worthy") rather than by
-   regex-matching uncertainty phrases per language.
-4. **Lesson durability vs decay.** A lesson with no recent
-   reinforcing audits — does it stay forever? Sleep could decay
-   importance over time so the persona doesn't stay haunted by a
-   single old failure. Same `last_confirmed_at` field handles this
-   if sleep treats it as decay input.
-5. **Verdict appeal.** Sometimes the audit will be wrong (the search
-   returned an irrelevant page, the LLM mis-classified). Should the
-   user be able to flag an audit as wrong? The schema supports this
-   trivially (a `disputed` flag column), but the UX is out of scope
-   for the MVP.
+The five design questions raised in the first draft have all been
+resolved. Recorded here so future readers can see the reasoning
+without diff-archaeology.
+
+1. **Search provider** → the RAG Engine grows a new additive
+   `search.run` message type on its existing `/v5/retrieval`
+   WebSocket. The Fragmenter opens a persistent WebSocket to that
+   endpoint (its first non-LLM peer) and never bundles its own Exa
+   client. Cleanest separation of concerns: Exa stays owned by the
+   RAG Engine; the Fragmenter consumes a thin contracted capability.
+
+2. **Per-user vs per-persona lessons** → per-persona, always. When a
+   persona talks to multiple users, the resulting lesson set is the
+   union of failure modes across all users — which makes the
+   persona more cautious overall, the direction we want. Per-user
+   lessons can be revisited when we observe a real case of
+   diverging conversation profiles requiring it.
+
+3. **Self-flagged uncertainty as auto-audit trigger** → yes,
+   handled inside the Layer-2 LLM gate prompt. We do not regex-match
+   uncertainty phrases per language; we tell the multilingual gate
+   model to recognise self-flagged uncertainty as a sufficient
+   condition for `audit_worthy: true` regardless of other criteria.
+
+4. **Lesson durability vs decay** → decay is driven by *repeatability,
+   not by calendar time*. The distillation pass similarity-matches
+   each new audit against existing active lessons; matches reinforce
+   (bump `last_confirmed_at`, eventually promote importance);
+   absence of matches for K consecutive sleep ticks demotes; an
+   `incidental` lesson that fails to reinforce for another K ticks
+   retires. Old lessons that the assistant keeps proving stay core;
+   one-offs that never recur eventually disappear.
+
+5. **Verdict appeal** → automated, not user-driven. The original
+   open question asked how a human user would dispute a bad audit.
+   The answer is they don't. The Fragmenter runs an **automated
+   appeal pass** at sleep time over `hallucinated`/`suspect` audits
+   exactly once, with deliberately adversarial query rephrasing and
+   adversarial adjudication framing so the second opinion is
+   genuine. Audits the appeal contradicts get `disputed = true` and
+   are excluded from lesson reinforcement going forward. UX surface
+   for human dispute can be added reactively if a stuck wrong
+   lesson is ever observed in practice.
+
+## Open implementation choices
+
+Things genuinely undecided at design time, to be settled during
+implementation by measuring:
+
+- **Layer-1 thresholds.** Character-length floor for "long enough
+  to bother auditing" (~600–800 chars is a starting guess) and
+  specifics-density floors (year tokens / 1k chars, quote-mark
+  count / paragraph). Tune on real traffic.
+- **Reinforcement cadence (N) and decay cadence (K).** How many
+  reinforcing audits before promoting a lesson one importance
+  tier, and how many barren sleep ticks before demoting. Starting
+  values: N = 3, K = 14 (about a week at 30-minute sleep cadence).
+- **`search.run` message shape on the RAG Engine.** Whether to add
+  a new top-level message type or to expose the thinner-pipeline
+  behaviour via a flag on the existing `retrieve_evidence`. New
+  message type is cleaner; flag is less work. Decide at
+  implementation review.
+- **Appeal-pass query-difference check.** How to confirm an
+  adversarial-rephrased query is actually different from the
+  original supportive query, not just a lexical reshuffle. Probably
+  the LLM that generated it can self-confirm, but worth
+  spot-checking on real cases.
 
 ## Relation to the v1 vision
 
