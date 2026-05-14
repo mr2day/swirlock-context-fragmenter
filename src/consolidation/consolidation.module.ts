@@ -4,6 +4,7 @@ import { RagEngineModule } from "../rag-engine/rag-engine.module";
 import { BackfillCrawlerService } from "./backfill-crawler.service";
 import { ConsolidationScheduler } from "./consolidation-scheduler.service";
 import { IdentityService } from "./identity.service";
+import { RealityDriftAppealService } from "./reality-drift-appeal.service";
 import { RealityDriftAuditService } from "./reality-drift-audit.service";
 import { RealityDriftGateService } from "./reality-drift-gate.service";
 import { SessionSummaryService } from "./session-summary.service";
@@ -16,6 +17,7 @@ import { SleepService } from "./sleep.service";
     IdentityService,
     RealityDriftGateService,
     RealityDriftAuditService,
+    RealityDriftAppealService,
     ConsolidationScheduler,
     BackfillCrawlerService,
     SleepService,

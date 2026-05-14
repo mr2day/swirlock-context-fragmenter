@@ -8,6 +8,7 @@ import {
 import { SERVICE_CONFIG } from "../config/config";
 import type { ServiceConfig } from "../config/config";
 import { IdentityService } from "./identity.service";
+import { RealityDriftAppealService } from "./reality-drift-appeal.service";
 
 /**
  * Periodic identity-consolidation job.
@@ -31,6 +32,7 @@ export class SleepService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly identity: IdentityService,
+    private readonly appeal: RealityDriftAppealService,
   ) {}
 
   onModuleInit(): void {
@@ -68,6 +70,19 @@ export class SleepService implements OnModuleInit, OnModuleDestroy {
     try {
       await this.consolidateScope("user");
       await this.consolidateScope("app");
+
+      // Unit E — appeal pass over hallucinated/suspect audits that
+      // have not been appealed yet. Best-effort: failures don't
+      // abort the tick.
+      try {
+        await this.appeal.runOutstandingAppeals();
+      } catch (err) {
+        this.log.warn(
+          `sleep appeal pass crashed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     } finally {
       this.running = false;
     }

@@ -42,7 +42,7 @@ memory; the RAG Engine is the *outward-looking* counterpart.
 | Repeatability-driven decay | done | applies to identity facts; same mechanism will apply to (future) lessons |
 | Reality-drift gate (Layer 1 + 2) | done | Unit C: log-only mode; structural pre-filter + single Utility-LLM JSON decision after each session.summary refresh; observed on real traffic before Unit D wires audits into storage |
 | Reality-drift spot-check + audits | done | Unit D: when gate marks audit_worthy=true, extracts claims, runs search.run per claim, adjudicates, rolls up to `hallucinated`/`suspect`/`clean`, writes `fragmenter_answer_audits` row |
-| Appeal pass | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
+| Appeal pass | done | Unit E: sleep-time pass re-adjudicates non-clean claims under adversarial query + framing; flips `disputed=1` when the new rollup is `clean`; each audit appealed at most once |
 | Experience-lesson distillation | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
 | Experience lessons in app-identity prompt block | planned | depends on distillation |
 | `search.run` capability on RAG Engine | done | Unit A: additive v5 message type on `/v5/retrieval`; single `search.completed` event, no progress stream |
@@ -117,15 +117,21 @@ with verdict and (when applicable) corrected summary.
   runs the audit synchronously on the maintenance worker.
 - **Depended on:** Unit A (`search.run`), Unit C (gate).
 
-### Unit E — Appeal pass
+### Unit E — Appeal pass — done
 
 Sleep-time second-opinion over `hallucinated` / `suspect` audits
 with adversarial query rephrasing and adversarial adjudication.
 Flips `disputed = true` on audits the appeal contradicts.
 
-- **Touches:** `SleepService`, audit table (`appealed_at`,
-  `disputed`).
-- **Depends on:** Unit D.
+- **Touched:** new `RealityDriftAppealService`; `SleepService.tick()`
+  now runs the appeal pass after identity scope consolidations. For
+  each outstanding audit (`turn_verdict IN ('hallucinated','suspect')
+  AND appealed_at IS NULL`), the service generates an adversarial
+  search query per problem claim, runs `search.run`, re-adjudicates
+  under "be willing to disagree" framing, re-applies the rollup, and
+  marks `disputed=1` when the new rollup is `clean`. `appealed_at`
+  is set unconditionally so no audit is appealed twice.
+- **Depended on:** Unit D.
 
 ### Unit F — Experience-lesson distillation + decay
 
