@@ -44,34 +44,31 @@ export function buildIdentityExtractionMessages(
   const systemLines: string[] = [
     `You extract durable identity facts about ${subjectLabel} from a chat-session summary.`,
     "",
-    "Goal: find facts that will still be useful several sessions from now — things that define who they are, what they do, how they prefer to interact, what ongoing concerns they hold.",
+    "Goal: every durable fact the new summary establishes about the subject — things that will still be useful several sessions from now (who they are, what they do, how they prefer to interact, what ongoing concerns they hold).",
     "",
     "Strict rules:",
     "- Output STRICT JSON only. Schema: {\"facts\": [{\"content\": string, \"importance\": \"core\"|\"important\"|\"incidental\"}]}.",
     "- No prose before or after the JSON. No code fences.",
     `- Each fact must be about ${subjectLabel}, not the other party.`,
     "- Each fact must be one short sentence (≤ 25 words), written in third person, in the same language as the summary.",
-    "- Do NOT invent facts. If the summary does not establish anything new, return {\"facts\": []}.",
-    "- Do NOT re-emit facts that are already in the 'Already known facts' section below — those are tracked. Only emit genuinely new information OR a clear correction/refinement of an existing fact (in which case mark importance high enough to override).",
-    "- Hard cap: at most 6 facts per extraction run.",
+    "- Do NOT invent facts. If the new summary establishes nothing durable about the subject, return {\"facts\": []}.",
+    "- Hard cap: at most 8 facts per extraction run.",
     "",
     IMPORTANCE_GUIDE,
   ];
 
   const userLines: string[] = [];
 
-  if (input.existingFacts.length > 0) {
-    userLines.push("Already known facts (do not repeat):");
-    for (const fact of input.existingFacts) {
-      userLines.push(`- [${fact.importance}] ${fact.content}`);
-    }
-    userLines.push("");
-  } else {
-    userLines.push("No facts are known yet for this subject.");
-    userLines.push("");
-  }
+  // Note: previously known facts are intentionally NOT shown to the
+  // model. Empirically, when the prompt included them, the model
+  // treated them as a "do not repeat" filter and returned empty even
+  // when the new summary clearly re-established a known fact, which
+  // broke Unit B's reinforcement signal. The fragmenter's
+  // deterministic content matcher handles dedup downstream; the
+  // sleep-merge LLM pass cleans up near-duplicates. The extractor's
+  // job is just to emit.
 
-  userLines.push("Latest session summary:");
+  userLines.push("Session summary:");
   userLines.push(input.sessionSummary);
   userLines.push("");
   userLines.push(

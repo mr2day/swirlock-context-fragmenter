@@ -1,5 +1,7 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger } from "@nestjs/common";
 import { randomUUID } from "crypto";
+import { SERVICE_CONFIG } from "../config/config";
+import type { ServiceConfig } from "../config/config";
 import { DatabaseService } from "../database/database.service";
 import { LlmHostService } from "../llm-host/llm-host.service";
 import {
@@ -26,8 +28,16 @@ export interface IdentityExtractionResult {
   scope: IdentityScope;
   key: string;
   insertedCount: number;
+  reinforcedCount: number;
   status: "updated" | "no_change" | "failed" | "skipped";
   reason?: string;
+}
+
+export interface IdentityDecayResult {
+  scope: IdentityScope;
+  demoted: number;
+  retired: number;
+  promoted: number;
 }
 
 export interface IdentityMergeResult {
@@ -52,6 +62,7 @@ export class IdentityService {
   private readonly log = new Logger(IdentityService.name);
 
   constructor(
+    @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly db: DatabaseService,
     private readonly llm: LlmHostService,
   ) {}
@@ -74,6 +85,7 @@ export class IdentityService {
         scope,
         key,
         insertedCount: 0,
+        reinforcedCount: 0,
         status: "skipped",
         reason: "empty key",
       };
@@ -83,6 +95,7 @@ export class IdentityService {
         scope,
         key,
         insertedCount: 0,
+        reinforcedCount: 0,
         status: "skipped",
         reason: "empty session summary",
       };
@@ -117,7 +130,14 @@ export class IdentityService {
       this.log.warn(
         `identity.extract ${scope}/${key} failed: ${reason}`,
       );
-      return { scope, key, insertedCount: 0, status: "failed", reason };
+      return {
+        scope,
+        key,
+        insertedCount: 0,
+        reinforcedCount: 0,
+        status: "failed",
+        reason,
+      };
     }
 
     const extracted = parseExtractedFacts(llmText);
@@ -131,35 +151,63 @@ export class IdentityService {
       this.log.warn(
         `identity.extract ${scope}/${key} parsed 0 facts. raw preview: ${preview}`,
       );
-      return { scope, key, insertedCount: 0, status: "no_change" };
+      return {
+        scope,
+        key,
+        insertedCount: 0,
+        reinforcedCount: 0,
+        status: "no_change",
+      };
     }
 
-    const existingKeys = new Set(
-      existing.map((r) => normalizeContent(r.content)),
-    );
-    const fresh = extracted.filter(
-      (f) => !existingKeys.has(normalizeContent(f.content)),
-    );
-
-    if (fresh.length === 0) {
-      return { scope, key, insertedCount: 0, status: "no_change" };
+    // Split the LLM's output into rows that match an existing active
+    // fact (reinforcement) and rows that are genuinely new (insertion).
+    // Reinforcement matters for Unit B's repeatability-driven decay:
+    // a fact the user keeps establishing across sessions accumulates
+    // reinforcement_count and last_confirmed_at, which lets the sleep
+    // pass promote it and protects it from decay.
+    const existingByKey = new Map<string, IdentityRow>();
+    for (const row of existing) {
+      existingByKey.set(normalizeContent(row.content), row);
+    }
+    const fresh: ExtractedFact[] = [];
+    const reinforceIds: string[] = [];
+    for (const f of extracted) {
+      const match = existingByKey.get(normalizeContent(f.content));
+      if (match) {
+        reinforceIds.push(match.id);
+      } else {
+        fresh.push(f);
+      }
     }
 
-    const inserted = this.insertFacts(scope, key, fresh, {
-      sourceKind: "session_extraction",
-      sourceSessionId,
-      correlationId,
-    });
+    let reinforced = 0;
+    if (reinforceIds.length > 0) {
+      reinforced = this.reinforceFacts(scope, reinforceIds);
+    }
+
+    let inserted = 0;
+    if (fresh.length > 0) {
+      inserted = this.insertFacts(scope, key, fresh, {
+        sourceKind: "session_extraction",
+        sourceSessionId,
+        correlationId,
+      });
+    }
 
     this.log.log(
-      `identity.extract ${scope}/${key} inserted ${inserted} fact(s) (had ${existing.length}, llm returned ${extracted.length}).`,
+      `identity.extract ${scope}/${key} inserted ${inserted}, reinforced ${reinforced} (had ${existing.length}, llm returned ${extracted.length}).`,
     );
 
     return {
       scope,
       key,
       insertedCount: inserted,
-      status: "updated",
+      reinforcedCount: reinforced,
+      // 'updated' only when content actually changed — pure reinforcement
+      // doesn't change the prompt-visible view, so the orchestrator does
+      // not need to invalidate caches.
+      status: inserted > 0 ? "updated" : "no_change",
     };
   }
 
@@ -318,6 +366,114 @@ export class IdentityService {
       .run(key);
   }
 
+  /**
+   * Unit B: repeatability-driven decay + promotion pass over all
+   * active rows in a scope. Runs once per sleep tick, after the
+   * LLM-driven merge pass.
+   *
+   * Decay rule (time-driven):
+   *  - Any active row whose `last_confirmed_at` is older than
+   *    `decayBarrenTicks * sleepIntervalMs` is decayed one tier.
+   *  - `core` -> `important`, `important` -> `incidental`,
+   *    `incidental` -> retired (superseded_at set).
+   *  - On decay we reset `last_confirmed_at = now` and
+   *    `reinforcement_count = 0` so the row gets another full barren
+   *    window before the next decay step fires, and so promotion
+   *    requires fresh reinforcements rather than counting historical
+   *    ones.
+   *
+   * Promotion rule (count-driven):
+   *  - `incidental` rows with `reinforcement_count >=
+   *    promotionReinforcementThreshold` are promoted to `important`.
+   *  - `important` rows with `reinforcement_count >=
+   *    2 * promotionReinforcementThreshold` are promoted to `core`.
+   *  - Promotion resets `reinforcement_count = 0` so a new tier has
+   *    to be earned fresh.
+   *
+   * Decay and promotion are mutually exclusive: a row that's
+   * eligible to decay (barren) cannot also be eligible to promote in
+   * the same tick, because we run decay first and decay resets
+   * `reinforcement_count`.
+   */
+  applyDecayPass(scope: IdentityScope): IdentityDecayResult {
+    const { table } = this.tableInfo(scope);
+    const sleepInterval = this.cfg.consolidation.sleepIntervalMs;
+    const barrenTicks = this.cfg.consolidation.decayBarrenTicks;
+    const promoteThreshold = this.cfg.consolidation.promotionReinforcementThreshold;
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const decayCutoffMs = now.getTime() - sleepInterval * barrenTicks;
+    const decayCutoffIso = new Date(decayCutoffMs).toISOString();
+
+    const txn = this.db.connection.transaction(() => {
+      // Retire `incidental` rows that have gone barren.
+      const retireStmt = this.db.connection.prepare(
+        `UPDATE ${table}
+            SET superseded_at = ?
+          WHERE superseded_at IS NULL
+            AND importance = 'incidental'
+            AND last_confirmed_at IS NOT NULL
+            AND last_confirmed_at < ?`,
+      );
+      const retired = retireStmt.run(nowIso, decayCutoffIso).changes;
+
+      // Demote `core` / `important` barren rows one tier; reset the
+      // barren clock and reinforcement counter so the new tier has a
+      // fresh window.
+      const demoteStmt = this.db.connection.prepare(
+        `UPDATE ${table}
+            SET importance = CASE importance
+                  WHEN 'core' THEN 'important'
+                  WHEN 'important' THEN 'incidental'
+                  ELSE importance
+                END,
+                last_confirmed_at = ?,
+                reinforcement_count = 0
+          WHERE superseded_at IS NULL
+            AND importance IN ('core', 'important')
+            AND last_confirmed_at IS NOT NULL
+            AND last_confirmed_at < ?`,
+      );
+      const demoted = demoteStmt.run(nowIso, decayCutoffIso).changes;
+
+      // Promote `important` rows that have accumulated enough
+      // reinforcements (2x threshold). Reset reinforcement_count.
+      const promoteToCoreStmt = this.db.connection.prepare(
+        `UPDATE ${table}
+            SET importance = 'core',
+                reinforcement_count = 0
+          WHERE superseded_at IS NULL
+            AND importance = 'important'
+            AND reinforcement_count >= ?`,
+      );
+      const promotedToCore = promoteToCoreStmt.run(
+        promoteThreshold * 2,
+      ).changes;
+
+      // Promote `incidental` rows that have accumulated enough
+      // reinforcements. Reset reinforcement_count.
+      const promoteToImportantStmt = this.db.connection.prepare(
+        `UPDATE ${table}
+            SET importance = 'important',
+                reinforcement_count = 0
+          WHERE superseded_at IS NULL
+            AND importance = 'incidental'
+            AND reinforcement_count >= ?`,
+      );
+      const promotedToImportant = promoteToImportantStmt.run(
+        promoteThreshold,
+      ).changes;
+
+      return {
+        demoted,
+        retired,
+        promoted: promotedToCore + promotedToImportant,
+      };
+    });
+
+    return { scope, ...txn() };
+  }
+
   private loadActiveFacts(
     scope: IdentityScope,
     key: string,
@@ -390,6 +546,29 @@ export class IdentityService {
           WHERE id = ?`,
       )
       .run(supersededAt, supersededById, rowId);
+  }
+
+  /**
+   * Unit B: bumps `last_confirmed_at` and `reinforcement_count` for
+   * each given row id. Called from `extract()` when a fresh LLM
+   * extraction's content matches an existing active row.
+   */
+  private reinforceFacts(scope: IdentityScope, rowIds: string[]): number {
+    if (rowIds.length === 0) return 0;
+    const { table } = this.tableInfo(scope);
+    const stmt = this.db.connection.prepare(
+      `UPDATE ${table}
+          SET last_confirmed_at = ?,
+              reinforcement_count = reinforcement_count + 1
+        WHERE id = ?`,
+    );
+    const now = new Date().toISOString();
+    let count = 0;
+    for (const id of rowIds) {
+      const result = stmt.run(now, id);
+      count += result.changes;
+    }
+    return count;
   }
 
   private tableInfo(scope: IdentityScope): { table: string; keyCol: string } {

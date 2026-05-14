@@ -131,5 +131,33 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       CREATE INDEX IF NOT EXISTS idx_app_identities_persona
         ON fragmenter_app_identities(persona_name, superseded_at);
     `);
+
+    // Unit B (repeatability-driven decay): each identity row tracks
+    // how many times an extraction has matched it. Reinforcement
+    // bumps the counter and `last_confirmed_at`; sleep uses both
+    // signals to demote, retire, or promote rows. Idempotent ALTER
+    // — runs once on the first boot after this change ships and is
+    // a no-op afterwards.
+    this.ensureColumn(
+      "fragmenter_user_identities",
+      "reinforcement_count",
+      "INTEGER NOT NULL DEFAULT 1",
+    );
+    this.ensureColumn(
+      "fragmenter_app_identities",
+      "reinforcement_count",
+      "INTEGER NOT NULL DEFAULT 1",
+    );
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const cols = this.connection
+      .prepare(`PRAGMA table_info(${table})`)
+      .all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === column)) return;
+    this.connection.exec(
+      `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`,
+    );
+    this.log.log(`Added column ${table}.${column}`);
   }
 }

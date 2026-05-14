@@ -80,6 +80,20 @@ const env = {
     // app_identities and asks the LLM to merge/dedupe/re-tier them.
     // Default: every 30 minutes. Set to 0 to disable.
     sleepIntervalMs: 30 * 60 * 1000,
+
+    // Repeatability-driven decay (Unit B). How many sleep-tick
+    // durations a fact may go without reinforcement before being
+    // demoted (or retired, if already incidental). 336 ticks at
+    // 30-min cadence = 7 days of barren time before any decay
+    // fires. Tunable per deployment.
+    decayBarrenTicks: 336,
+
+    // How many reinforcements a row needs to climb one importance
+    // tier. incidental -> important requires this many; important
+    // -> core requires twice this many. Reinforcement happens when
+    // a fresh extraction's content matches an existing active
+    // row's content (case + whitespace normalised).
+    promotionReinforcementThreshold: 3,
   },
 };
 

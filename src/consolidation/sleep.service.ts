@@ -77,6 +77,10 @@ export class SleepService implements OnModuleInit, OnModuleDestroy {
     const keys = this.identity.listActiveKeys(scope);
     if (keys.length === 0) {
       this.log.log(`sleep: no active ${scope} identities to consolidate.`);
+      // Still run the decay pass — there may be no active keys
+      // *because* prior rows just decayed below the activity bar.
+      // Cheap SQL, no LLM call.
+      this.runDecayPass(scope);
       return;
     }
     this.log.log(
@@ -97,7 +101,32 @@ export class SleepService implements OnModuleInit, OnModuleDestroy {
       }
     }
     this.log.log(
-      `sleep: ${scope} pass done; merged ${merged}/${keys.length} key(s).`,
+      `sleep: ${scope} merge pass done; merged ${merged}/${keys.length} key(s).`,
     );
+
+    // Unit B: repeatability-driven decay + promotion. Runs once per
+    // scope, after merges, before next tick. Pure SQL, no LLM call.
+    this.runDecayPass(scope);
+  }
+
+  private runDecayPass(scope: "user" | "app"): void {
+    try {
+      const decay = this.identity.applyDecayPass(scope);
+      if (decay.demoted + decay.retired + decay.promoted > 0) {
+        this.log.log(
+          `sleep: ${scope} decay pass — demoted ${decay.demoted}, retired ${decay.retired}, promoted ${decay.promoted}.`,
+        );
+      } else {
+        this.log.log(
+          `sleep: ${scope} decay pass — no changes (all rows within barren window or below promotion threshold).`,
+        );
+      }
+    } catch (err) {
+      this.log.warn(
+        `sleep decay ${scope} crashed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 }

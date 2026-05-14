@@ -20,6 +20,21 @@ export interface ConsolidationConfig {
    * milliseconds. Set to 0 to disable.
    */
   sleepIntervalMs: number;
+  /**
+   * How many consecutive sleep-tick durations a fact may go without
+   * reinforcement before being decayed. Demotes `core` -> `important`,
+   * `important` -> `incidental`. An `incidental` row that hits this
+   * threshold is retired (superseded_at set).
+   *
+   * Default 336 = roughly 7 days at the default 30-min sleep cadence.
+   */
+  decayBarrenTicks: number;
+  /**
+   * How many reinforcements a row needs to be promoted one tier.
+   * `incidental` -> `important` requires this many; `important` ->
+   * `core` requires twice this many.
+   */
+  promotionReinforcementThreshold: number;
 }
 
 export interface ServiceConfig {
@@ -79,5 +94,15 @@ function validate(c: ServiceConfig): void {
     Number.isInteger(c.consolidation?.sleepIntervalMs) &&
       c.consolidation.sleepIntervalMs >= 0,
     "consolidation.sleepIntervalMs must be a non-negative integer",
+  );
+  must(
+    Number.isInteger(c.consolidation?.decayBarrenTicks) &&
+      c.consolidation.decayBarrenTicks > 0,
+    "consolidation.decayBarrenTicks must be a positive integer",
+  );
+  must(
+    Number.isInteger(c.consolidation?.promotionReinforcementThreshold) &&
+      c.consolidation.promotionReinforcementThreshold > 0,
+    "consolidation.promotionReinforcementThreshold must be a positive integer",
   );
 }
