@@ -43,7 +43,9 @@ memory; the RAG Engine is the *outward-looking* counterpart.
 | Experience lessons in app-identity prompt block | planned | depends on distillation |
 | `search.run` capability on RAG Engine | planned | new additive v5 message type on `/v5/retrieval` |
 | Short-term vs long-term explicit tiering | not started | partially implicit today (summary vs identity) |
-| Per-query relevance selection | not started | last major v1 piece |
+| Cross-session conversation episodes | not started | the bot remembering past conversations, not just past facts; new `fragmenter_conversation_episodes` table |
+| Memory TOC + LLM-driven fetch | not started | replaces "dump all active facts"; bot decides which chapters to read |
+| Per-chapter embedding-similarity ranking | not started | inner layer of the TOC architecture |
 
 ## Action plan
 
@@ -127,17 +129,56 @@ lessons and starts choosing SEARCH on patterns it learned to fear.
   `buildAnswerPrompt`).
 - **Depends on:** Unit F (table populated).
 
-### Unit H — Per-query relevance selection (the v1 "fragmented" semantics)
+### Unit H — Cross-session conversation episodes
 
-Replace the current "dump all active facts" rendering with
-relevance-selected fragments. Likely an embedding match between the
-current user query and per-fact embeddings, with a rule that always
-includes `core` tier regardless of relevance score.
+The bot does not yet remember what was discussed in previous
+sessions, only the facts those sessions extracted. Add a new
+`fragmenter_conversation_episodes` table containing per-session
+topical summaries with `{session_id, topic, summary, occurred_at}`.
+Populated during sleep from the session summaries. Prerequisite for
+Unit I's "long-term conversation memory" chapter.
 
-- **Touches:** orchestrator, possibly the embedding service (per-fact
-  embeddings stored on the identity / lessons tables).
-- **Depends on:** nothing structurally; can be slotted any time after
-  identity tables have meaningful content.
+- **Touches:** new table, new `consolidationKind:
+  conversation_episode`, sleep-time worker.
+- **Depends on:** nothing.
+- **Unblocks:** Unit I.
+
+### Unit I — Memory TOC + LLM-driven fetch (the v1 "fragmented" semantics)
+
+Replace the current "dump all active facts" rendering with a
+**table of contents over the memory**. Each chapter (persona core,
+life experience / experience-lessons, user identity, cross-session
+conversation episodes, current-session summary) is represented at
+prompt time by a short stub describing what's in it. The persona
+LLM decides on the turn which chapters to read further, via a
+structured fetch call.
+
+Two-layer relevance:
+
+- **Outer layer (LLM-driven, this unit):** the bot reads stubs and
+  decides which chapters to fetch.
+- **Inner layer (embedding-similarity, this unit):** within a
+  fetched chapter, top-K ranking by embedding similarity to the
+  current query; `core` tier always included regardless of score.
+
+The Fragmenter owns stub generation — regenerated on each memory
+write to the relevant chapter, during the same sleep pass.
+Fall-back semantics: if the bot's fetch call returns nothing or is
+malformed, render the current "dump everything" view for that
+chapter so the turn never fails on tool-call brittleness.
+
+Discipline: stubs are for *long-term* chapters only. The current
+session's summary, the hot active conversation tail, and `core`-tier
+identity facts remain always-inline — they're small enough not to
+need gating and too critical to depend on fetch reliability.
+
+- **Touches:** Fragmenter (stub generation per chapter), orchestrator
+  (TOC prompt block + fetch handling + fall-back render), per-fact /
+  per-episode embeddings (likely via the embedding service).
+- **Depends on:** Units B–G producing real memory volume; Unit H
+  producing cross-session episodes.
+- **Rationale:** see [PHILOSOPHY.md](./PHILOSOPHY.md) §"The TOC + fetch
+  architecture".
 
 ## What's deliberately not on the list
 
