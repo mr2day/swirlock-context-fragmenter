@@ -40,7 +40,7 @@ memory; the RAG Engine is the *outward-looking* counterpart.
 | Per-cutoff session summaries (no raw/summary overlap) | done | Unit K: fragmenter_session_summaries uses composite PK (session_id, through_seq); orchestrator fetches the summary covering messages older than the raw hot zone and trims raw to seq > summary.throughSeq |
 | total_token_count fast path in prompt assembly | done | When the cumulative session token count plus mandatory fits the budget, buildAnswerPrompt skips per-message tokenisation and pushes all messages raw; slow path only runs on actual overflow or pre-Unit-J sessions |
 | Repeatability-driven decay | done | applies to identity facts; same mechanism will apply to (future) lessons |
-| Reality-drift gate (Layer 1 + 2) | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
+| Reality-drift gate (Layer 1 + 2) | done | Unit C: log-only mode; structural pre-filter + single Utility-LLM JSON decision after each session.summary refresh; observed on real traffic before Unit D wires audits into storage |
 | Reality-drift spot-check + audits | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
 | Appeal pass | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
 | Experience-lesson distillation | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
@@ -80,15 +80,25 @@ consecutive sleep ticks; retires `incidental` rows after K more.
   distillation) will need. Implementing here first lets us tune the
   cadences on real data before they ride lessons too.
 
-### Unit C — Reality-drift gate (Layer 1 + Layer 2)
+### Unit C — Reality-drift gate (Layer 1 + Layer 2) — done
+
+Status: shipped at swirlock-context-fragmenter e7249fa.
 
 Structural pre-filter + Utility-LLM `audit_worthy` call after every
-assistant turn. **Log decisions only**, no audit storage yet. The
-purpose at this stage is to observe gate quality on real traffic
-before any downstream consumer depends on it.
+session.summary refresh. Log-only — no audit table, no search calls,
+no downstream consumer yet. Decisions appear in pm2 logs as
+`[gate:l1]` and `[gate:l2]` lines.
 
-- **Touches:** new `RealityDriftGateService` in the fragmenter.
-- **Depends on:** nothing.
+First real-traffic observation: on the seq-60 attribution-test turn,
+Layer 1 caught the unsourced quoted claim and Layer 2 made a
+conservative `audit_worthy=false` call on a META message about
+prior conversation. Thresholds and prompt remain at MVP defaults
+until 10–20 more decisions accumulate for principled tuning.
+
+- **Touched:** new `RealityDriftGateService` in the fragmenter;
+  wired into `ConsolidationScheduler.drain` after the existing
+  identity-extraction step.
+- **Depended on:** nothing.
 - **Unblocks:** Unit D.
 
 ### Unit D — Reality-drift spot-check + audit storage
