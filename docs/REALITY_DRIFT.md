@@ -46,45 +46,88 @@ Three orthogonal axes:
 A turn is **audit-eligible** when specificity is high, grounding is
 low, and verifiability is non-zero.
 
-## Detection markers (the gate)
+## The gate: which turns to audit
 
-We never audit every turn. We score each finished assistant message
-against a small set of cheap, deterministic markers; if the score
-crosses a threshold the audit pipeline runs.
+We never audit every turn. The gate has two layers — a free
+structural pre-filter and a cheap LLM-driven decision for whatever
+the pre-filter lets through.
 
-Suggested markers, all computed by the fragmenter without an LLM:
+### Why not a regex/keyword-only gate
 
-1. **Specific-entity density.** Count proper-noun tokens, year-like
-   numbers (`19\d\d`, `20\d\d`), and money/quantity tokens
-   (`\d+(\.\d+)?\s?(km|km/h|kg|million|miliard|lei|euros?|dollar)`).
-   Normalize per 1k chars.
-2. **Citation-free length.** Long answers (> 1500 chars) that did
-   not consume any RAG evidence on this turn. Length without
-   grounding correlates with confabulation.
-3. **Cross-fact density.** Sentences that connect ≥ 2 named entities
-   with a relationship verb (`a colaborat cu`, `a fost rival cu`,
-   `was married to`, `worked with`). Cross-fact narratives are the
-   most expensive to verify and the most often invented.
-4. **High-risk domain heuristic.** Match against a curated keyword
-   list per persona: biographical claims about non-public people,
-   regional underworld histories, niche scientific/medical claims,
-   recent/breaking events past the model's training cutoff. Tunable
-   per deployment.
-5. **Hedge-density paradox.** Many small hedges (`pare că`,
-   `probabil`, `aparent`, `se spune că`) inside an otherwise
-   confident-sounding answer. LLMs often soften individual claims
-   while compounding many of them into a confident whole.
-6. **Bot self-citation pattern.** The bot says "according to
-   reports" / "sources say" / "presa a relatat că" without a single
-   actual source being attached.
+A purely deterministic gate would have to encode hedge words,
+relationship verbs, self-citation phrases, and proper-noun heuristics
+that all change per language. A regex pack tuned for English and
+Romanian would degrade for Italian, Spanish, French, German;
+deteriorate further for Finnish, Hungarian, Estonian, Basque, Turkish
+(agglutinative morphology defeats fixed lexical patterns); and fall
+apart for Arabic, Greek, Hebrew, Georgian, Armenian, Korean, Japanese,
+Thai (different scripts, no casing-based proper-noun detection, no
+useful surface markers for the lexical features above). The bot is
+not single-language and the gate cannot be either.
 
-These are deliberately conservative — false positives just spend
-search budget; false negatives let bad memory form. The threshold is
-configured per persona.
+The fragmenter LLM is already multilingual. We use that, scoped
+narrowly, as the gate.
 
-Turns that already ran SEARCH on this turn are **excluded** from
-auditing. Auditing them would re-litigate retrieval quality, which is
-a different problem.
+### Layer 1 — structural pre-filter (no LLM, language-agnostic)
+
+A turn is candidate for auditing only if all of the following hold.
+All three are pure character / structural checks that work for any
+language and any script:
+
+1. **No SEARCH on this turn.** If the orchestrator ran retrieval and
+   the assistant's answer was grounded in attached evidence, the
+   problem is "retrieval quality", not "hallucination". Different
+   feature, different fix.
+2. **Length above threshold.** Answers shorter than ~600–800 chars
+   rarely contain enough specific claims to be worth a check.
+3. **Specifics-density above threshold.** Cheap structural counters,
+   normalized per 1k chars:
+   - **Year-like numeric tokens** (`19\d\d`, `20\d\d`, plus the
+     equivalent over Arabic-Indic digits `[٠-٩]{4}`).
+   - **Quantity-like tokens** (digits adjacent to short alpha runs of
+     1–6 characters — the shape `(\d+)\s?([A-Za-z]{1,6})` and the
+     same over the Unicode `\p{L}` letter class for non-Latin
+     scripts).
+   - **Quoted-substring count** across the common quote families
+     (`"…"`, `'…'`, `« … »`, `„ … "`, `‹ … ›`, `「 … 」`, etc.)
+     **without** any URL in the same paragraph.
+
+   The unit names themselves do not matter — we never read them. We
+   only count the *shape* `digit + short word`. That shape exists in
+   every language we plan to support.
+
+This pre-filter is intended to drop the trivial 80–90% of turns
+(small talk, short factual replies, answers that already used SEARCH)
+without spending an LLM call.
+
+### Layer 2 — LLM gate (one Utility-LLM call, multilingual)
+
+For turns that pass Layer 1, the fragmenter makes a single small
+Utility-LLM call. The Utility LLM is the same multilingual model
+already used for the session summary and identity extraction; it
+needs no per-language tuning.
+
+The prompt is roughly:
+
+> You are reviewing a single message the assistant produced in a chat.
+> Output STRICT JSON only:
+> `{ "audit_worthy": boolean, "hallucination_risk": 0..10, "why": string }`.
+> Mark `audit_worthy: true` only when the message makes specific
+> factual claims about real-world people, places, organisations,
+> events, dates, statistics, quoted statements, or relationships
+> between named entities, AND those claims are not visibly grounded in
+> sources cited inside this same message. Conversational pleasantries,
+> opinions, self-descriptions, generic explanations, and clearly
+> hypothetical statements are not audit-worthy. Answer in any
+> language; the underlying message can be in any language.
+
+The model is told to be conservative — false positives just waste
+search budget on Layer 3, while false negatives let bad memories form
+silently — so we lean toward "yes, audit" on borderline cases.
+
+Layer-2 cost: one Utility-LLM call per Layer-1-eligible turn, on
+`maintenance` priority. The fragmenter runs while the user is
+composing their next message, never blocking the live turn.
 
 ## Spot-check pipeline
 
@@ -221,10 +264,13 @@ decision in the right direction next time. That closes the loop:
 
 ## Cost guardrails
 
-- **Audit eligibility gate** is cheap (regex + counts). 0 LLM calls
-  for ineligible turns.
-- **Per-audit cap**: ≤ 5 claims, ≤ 3 search calls, ≤ 4 LLM calls,
-  hard timeout 60 s.
+- **Layer-1 pre-filter** is free (counts and regex shape-matching,
+  no LLM). Drops the bulk of turns.
+- **Layer-2 LLM gate**: 1 small Utility-LLM call per Layer-1-eligible
+  turn, capped to ~256 input tokens of context (the assistant message
+  itself, possibly truncated). No retrieval at this stage.
+- **Per-audit cap (Layer 3 onward)**: ≤ 5 claims, ≤ 3 search calls,
+  ≤ 4 LLM calls, hard timeout 60 s.
 - **Per-session quota**: ≤ 5 audits per session per calendar day,
   configurable.
 - **Per-persona quota**: ≤ 50 audits per persona per day across all
@@ -249,9 +295,14 @@ host queue. It must never block the user-facing turn.
    users with diverging conversation profiles.
 3. **Self-flagged uncertainty as auto-audit trigger.** If the bot
    itself says "I'm not 100% sure" or "I might be wrong about this"
-   mid-answer, should that automatically trigger an audit even when
-   other markers don't fire? Probably yes — it's the cheapest, most
-   reliable signal.
+   mid-answer, should that automatically promote the turn to
+   audit-worthy regardless of what the Layer-2 LLM gate decides?
+   Probably yes — it is the cheapest, most reliable hallucination
+   signal — but it shares the same language-coverage problem the
+   structural pre-filter solves by avoiding. Best handled by adding
+   the cue to the Layer-2 gate prompt explicitly ("treat
+   self-flagged uncertainty as audit-worthy") rather than by
+   regex-matching uncertainty phrases per language.
 4. **Lesson durability vs decay.** A lesson with no recent
    reinforcing audits — does it stay forever? Sleep could decay
    importance over time so the persona doesn't stay haunted by a
