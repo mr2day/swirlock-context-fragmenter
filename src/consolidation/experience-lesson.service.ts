@@ -124,13 +124,13 @@ export class ExperienceLessonService {
    * (per-persona) table.
    */
   applyDecayPass(): ExperienceLessonDecayResult {
-    const sleepInterval = this.cfg.consolidation.sleepIntervalMs;
+    const quietThreshold = this.cfg.consolidation.quietThresholdMs;
     const barrenTicks = this.cfg.consolidation.decayBarrenTicks;
     const promoteThreshold =
       this.cfg.consolidation.promotionReinforcementThreshold;
     const now = new Date();
     const nowIso = now.toISOString();
-    const decayCutoffMs = now.getTime() - sleepInterval * barrenTicks;
+    const decayCutoffMs = now.getTime() - quietThreshold * barrenTicks;
     const decayCutoffIso = new Date(decayCutoffMs).toISOString();
 
     const txn = this.db.connection.transaction(() => {

@@ -22,10 +22,12 @@ export interface ConsolidationConfig {
   sessionSummaryMaxRecentMessages: number;
   maxQueueDepth: number;
   /**
-   * How often the identity-consolidation ("sleep") job runs, in
-   * milliseconds. Set to 0 to disable.
+   * How long (ms) the fragmenter must observe no `session.observed`
+   * activity before flipping to "sleeping" mode and running a sleep
+   * tick. Sleep runs at most once per quiet window; the next tick
+   * fires only after a fresh active→sleeping transition.
    */
-  sleepIntervalMs: number;
+  quietThresholdMs: number;
   /**
    * How many consecutive sleep-tick durations a fact may go without
    * reinforcement before being decayed. Demotes `core` -> `important`,
@@ -121,9 +123,9 @@ function validate(c: ServiceConfig): void {
     "consolidation.maxQueueDepth must be a positive integer",
   );
   must(
-    Number.isInteger(c.consolidation?.sleepIntervalMs) &&
-      c.consolidation.sleepIntervalMs >= 0,
-    "consolidation.sleepIntervalMs must be a non-negative integer",
+    Number.isInteger(c.consolidation?.quietThresholdMs) &&
+      c.consolidation.quietThresholdMs > 0,
+    "consolidation.quietThresholdMs must be a positive integer",
   );
   must(
     Number.isInteger(c.consolidation?.decayBarrenTicks) &&

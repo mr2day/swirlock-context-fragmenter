@@ -373,7 +373,7 @@ export class IdentityService {
    *
    * Decay rule (time-driven):
    *  - Any active row whose `last_confirmed_at` is older than
-   *    `decayBarrenTicks * sleepIntervalMs` is decayed one tier.
+   *    `decayBarrenTicks * quietThresholdMs` is decayed one tier.
    *  - `core` -> `important`, `important` -> `incidental`,
    *    `incidental` -> retired (superseded_at set).
    *  - On decay we reset `last_confirmed_at = now` and
@@ -397,12 +397,12 @@ export class IdentityService {
    */
   applyDecayPass(scope: IdentityScope): IdentityDecayResult {
     const { table } = this.tableInfo(scope);
-    const sleepInterval = this.cfg.consolidation.sleepIntervalMs;
+    const quietThreshold = this.cfg.consolidation.quietThresholdMs;
     const barrenTicks = this.cfg.consolidation.decayBarrenTicks;
     const promoteThreshold = this.cfg.consolidation.promotionReinforcementThreshold;
     const now = new Date();
     const nowIso = now.toISOString();
-    const decayCutoffMs = now.getTime() - sleepInterval * barrenTicks;
+    const decayCutoffMs = now.getTime() - quietThreshold * barrenTicks;
     const decayCutoffIso = new Date(decayCutoffMs).toISOString();
 
     const txn = this.db.connection.transaction(() => {

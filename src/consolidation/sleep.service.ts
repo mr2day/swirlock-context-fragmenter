@@ -1,66 +1,36 @@
-import {
-  Inject,
-  Injectable,
-  Logger,
-  OnModuleDestroy,
-  OnModuleInit,
-} from "@nestjs/common";
-import { SERVICE_CONFIG } from "../config/config";
-import type { ServiceConfig } from "../config/config";
+import { Injectable, Logger } from "@nestjs/common";
 import { ExperienceLessonService } from "./experience-lesson.service";
 import { IdentityService } from "./identity.service";
 import { RealityDriftAppealService } from "./reality-drift-appeal.service";
 
 /**
- * Periodic identity-consolidation job.
+ * The fragmenter's deep-memory pass.
  *
- * In the v1 vision this is called "sleep": a scheduled pass that
- * re-reads every active identity fact for each (scope, key) pair,
- * asks the LLM to merge duplicates, drop subsumed incidentals, and
- * re-tier the survivors, then writes the consolidated list back and
- * supersedes the old rows.
+ * Run by `ActivityMonitorService` whenever the system has been quiet
+ * (no `session.observed` in the configured quiet window). Each tick
+ * does, in order:
+ *   - identity merges per scope (user/app)
+ *   - reinforcement-driven decay over identity rows
+ *   - appeal pass over outstanding hallucinated/suspect audits
+ *   - experience-lesson distillation per persona
+ *   - reinforcement-driven decay over lesson rows
  *
- * The MVP cadence is configurable (`consolidation.sleepIntervalMs`).
- * Runs serially across scopes/keys to keep LLM-host pressure low.
+ * Best-effort throughout — a failure in one step never aborts the
+ * tick. Re-entrancy guarded by `running`.
  */
 @Injectable()
-export class SleepService implements OnModuleInit, OnModuleDestroy {
+export class SleepService {
   private readonly log = new Logger(SleepService.name);
-  private timer?: NodeJS.Timeout;
   private running = false;
-  private destroyed = false;
 
   constructor(
-    @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly identity: IdentityService,
     private readonly appeal: RealityDriftAppealService,
     private readonly lessons: ExperienceLessonService,
   ) {}
 
-  onModuleInit(): void {
-    const interval = this.cfg.consolidation.sleepIntervalMs;
-    if (!Number.isFinite(interval) || interval <= 0) {
-      this.log.log(
-        "Sleep job disabled (consolidation.sleepIntervalMs is 0 or unset).",
-      );
-      return;
-    }
-    this.log.log(
-      `Sleep job scheduled every ${Math.round(interval / 60_000)} min.`,
-    );
-    this.timer = setInterval(() => {
-      void this.tick().catch((err: Error) => {
-        this.log.warn(`sleep tick crashed: ${err.message}`);
-      });
-    }, interval);
-  }
-
-  onModuleDestroy(): void {
-    this.destroyed = true;
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = undefined;
-    }
+  isRunning(): boolean {
+    return this.running;
   }
 
   async tick(): Promise<void> {
@@ -69,6 +39,7 @@ export class SleepService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     this.running = true;
+    this.log.log("sleep: tick started.");
     try {
       await this.consolidateScope("user");
       await this.consolidateScope("app");
@@ -127,7 +98,6 @@ export class SleepService implements OnModuleInit, OnModuleDestroy {
     );
     let merged = 0;
     for (const key of keys) {
-      if (this.destroyed) return;
       try {
         const r = await this.identity.merge({ scope, key });
         if (r.status === "merged") merged += 1;

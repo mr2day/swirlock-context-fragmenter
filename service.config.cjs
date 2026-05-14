@@ -86,11 +86,12 @@ const env = {
     // Older jobs for the same sessionId are coalesced.
     maxQueueDepth: 256,
 
-    // How often the identity-consolidation ("sleep") job runs, in
-    // milliseconds. The job walks all active user_identities and
-    // app_identities and asks the LLM to merge/dedupe/re-tier them.
-    // Default: every 30 minutes. Set to 0 to disable.
-    sleepIntervalMs: 30 * 60 * 1000,
+    // How long the fragmenter must observe no `session.observed`
+    // activity before flipping into sleep mode and running a sleep
+    // tick. The tick fires at most once per quiet window — the next
+    // sleep pass requires a fresh active→sleeping transition.
+    // Default: 30 minutes.
+    quietThresholdMs: 30 * 60 * 1000,
 
     // Repeatability-driven decay (Unit B). How many sleep-tick
     // durations a fact may go without reinforcement before being

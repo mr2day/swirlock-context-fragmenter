@@ -6,11 +6,16 @@ import {
   RagEngineService,
   type SearchRunResult,
 } from "../rag-engine/rag-engine.service";
-import type { RealityDriftGateDecision } from "./reality-drift-gate.service";
 
 const MAX_CLAIMS = 5;
 const EVIDENCE_HIGHLIGHT_MAX_CHARS = 900;
 const EXTRACT_LIMIT_PER_CLAIM = 2;
+
+export interface AuditTurnRef {
+  sessionId: string;
+  turnId: string;
+  assistantMessageId: string;
+}
 
 export type ClaimVerdict =
   | "verified"
@@ -46,6 +51,13 @@ export interface AuditResult {
   reason?: string;
 }
 
+/**
+ * Free-form forensic metadata captured at audit time. The caller
+ * decides what to record; the audit service just serialises it on
+ * the row.
+ */
+export type AuditMarkers = Record<string, unknown>;
+
 interface SessionMetaRow {
   user_id: string | null;
   persona_name: string | null;
@@ -65,27 +77,32 @@ export class RealityDriftAuditService {
     private readonly rag: RagEngineService,
   ) {}
 
-  async auditTurn(
-    decision: RealityDriftGateDecision,
-    assistantMessageContent: string,
-  ): Promise<AuditResult> {
-    if (!decision.layer2?.attempted || !decision.layer2.succeeded) {
-      return { status: "skipped", reason: "layer2 not succeeded" };
-    }
-    if (decision.layer2.auditWorthy !== true) {
-      return { status: "skipped", reason: "not audit-worthy" };
-    }
-
+  /**
+   * Run the full audit pipeline for a single assistant message:
+   * extract claims → search.run per claim → adjudicate → roll up to
+   * a turn-level verdict → optionally summarise the correction →
+   * persist a `fragmenter_answer_audits` row.
+   *
+   * Returns the per-claim audits and rolled-up verdict so callers
+   * (e.g. the hallucination-index service) can compute their own
+   * scores. The caller decides whether to invoke this at all; this
+   * method does not skip based on any pre-check.
+   */
+  async auditTurn(args: {
+    turn: AuditTurnRef;
+    assistantMessageContent: string;
+    markers?: AuditMarkers;
+  }): Promise<AuditResult> {
     const auditCorrelationId = `cf:audit:${randomUUID()}`;
     const startedAt = Date.now();
     this.log.log(
-      `[audit] start sessionId=${decision.sessionId} turnId=${decision.turnId} msgId=${decision.assistantMessageId}`,
+      `[audit] start sessionId=${args.turn.sessionId} turnId=${args.turn.turnId} msgId=${args.turn.assistantMessageId}`,
     );
 
     let claims: AuditClaim[];
     try {
       claims = await this.extractClaims(
-        assistantMessageContent,
+        args.assistantMessageContent,
         auditCorrelationId,
       );
     } catch (err) {
@@ -96,9 +113,14 @@ export class RealityDriftAuditService {
 
     if (claims.length === 0) {
       this.log.log(
-        `[audit] no check-worthy claims extracted; writing skip-clean audit`,
+        `[audit] no check-worthy claims extracted; skipping persistence`,
       );
-      return this.persistClean(decision, assistantMessageContent, [], auditCorrelationId);
+      return {
+        status: "skipped",
+        reason: "no check-worthy claims",
+        claims: [],
+        turnVerdict: "clean",
+      };
     }
 
     const claimAudits: ClaimAudit[] = [];
@@ -154,7 +176,7 @@ export class RealityDriftAuditService {
     if (turnVerdict !== "clean") {
       try {
         correctedSummary = await this.summarizeCorrection(
-          assistantMessageContent,
+          args.assistantMessageContent,
           claimAudits,
           auditCorrelationId,
         );
@@ -166,7 +188,8 @@ export class RealityDriftAuditService {
     }
 
     const persisted = await this.persistAudit({
-      decision,
+      turn: args.turn,
+      markers: args.markers ?? {},
       claimAudits,
       turnVerdict,
       correctedSummary,
@@ -174,7 +197,7 @@ export class RealityDriftAuditService {
     });
 
     this.log.log(
-      `[audit] done sessionId=${decision.sessionId} turnId=${decision.turnId} verdict=${turnVerdict} claims=${claimAudits.length} (${Date.now() - startedAt}ms)`,
+      `[audit] done sessionId=${args.turn.sessionId} turnId=${args.turn.turnId} verdict=${turnVerdict} claims=${claimAudits.length} (${Date.now() - startedAt}ms)`,
     );
 
     return {
@@ -340,30 +363,9 @@ export class RealityDriftAuditService {
     return "clean";
   }
 
-  private async persistClean(
-    decision: RealityDriftGateDecision,
-    _assistantMessage: string,
-    claims: ClaimAudit[],
-    auditCorrelationId: string,
-  ): Promise<AuditResult> {
-    const persisted = await this.persistAudit({
-      decision,
-      claimAudits: claims,
-      turnVerdict: "clean",
-      correctedSummary: null,
-      auditCorrelationId,
-    });
-    return {
-      status: "written",
-      auditId: persisted.auditId,
-      turnVerdict: "clean",
-      claims,
-      correctedSummary: null,
-    };
-  }
-
   private async persistAudit(args: {
-    decision: RealityDriftGateDecision;
+    turn: AuditTurnRef;
+    markers: AuditMarkers;
     claimAudits: ClaimAudit[];
     turnVerdict: TurnVerdict;
     correctedSummary: string | null;
@@ -371,13 +373,10 @@ export class RealityDriftAuditService {
   }): Promise<{ auditId: string }> {
     const auditId = randomUUID();
     const auditedAt = new Date().toISOString();
-    const meta = this.loadSessionMeta(args.decision.sessionId);
-    const msgMeta = this.loadMessageMeta(args.decision.assistantMessageId);
+    const meta = this.loadSessionMeta(args.turn.sessionId);
+    const msgMeta = this.loadMessageMeta(args.turn.assistantMessageId);
 
-    const markersTriggered = JSON.stringify({
-      layer1: args.decision.layer1,
-      layer2: args.decision.layer2,
-    });
+    const markersTriggered = JSON.stringify(args.markers);
     const claimsChecked = JSON.stringify(args.claimAudits);
 
     this.db.connection
@@ -391,9 +390,9 @@ export class RealityDriftAuditService {
       )
       .run(
         auditId,
-        args.decision.sessionId,
-        args.decision.turnId,
-        args.decision.assistantMessageId,
+        args.turn.sessionId,
+        args.turn.turnId,
+        args.turn.assistantMessageId,
         meta?.user_id ?? null,
         meta?.persona_name ?? null,
         msgMeta?.created_at ?? auditedAt,

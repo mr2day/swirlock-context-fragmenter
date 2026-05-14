@@ -2,9 +2,8 @@ import { Inject, Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { SERVICE_CONFIG } from "../config/config";
 import type { ServiceConfig } from "../config/config";
 import { DatabaseService } from "../database/database.service";
+import { HallucinationIndexService } from "./hallucination-index.service";
 import { IdentityService } from "./identity.service";
-import { RealityDriftAuditService } from "./reality-drift-audit.service";
-import { RealityDriftGateService } from "./reality-drift-gate.service";
 import {
   SessionSummaryService,
   type SessionSummaryRunResult,
@@ -16,7 +15,8 @@ export interface ConsolidationUpdatedEvent {
     | "session.summary"
     | "identity.user"
     | "identity.app"
-    | "answer.reality_check";
+    | "answer.reality_check"
+    | "answer.hallucination_index";
   occurredAt: string;
 }
 
@@ -35,25 +35,22 @@ interface QueuedJob {
   observedAt: string;
 }
 
+export type ActivityObserver = (sessionId: string, observedAt: string) => void;
+
 /**
- * Coordinates when consolidation work runs.
+ * Coordinates the fragmenter's active-mode work.
  *
- * The scheduler is intentionally simple in the MVP:
- *
- * - On `session.observed`, decide whether the session has accumulated
- *   enough new turns to justify a new summary (debounce against the
- *   contracted `sessionSummaryMinNewTurns` threshold).
- * - If yes, enqueue a job. The job is keyed by `sessionId` — repeated
- *   observations for the same session coalesce into a single pending
- *   job (last-seen `lastSeq`/`observedAt` win).
- * - A single worker drains the queue. Concurrent runs for the *same*
- *   session never happen; concurrent runs for *different* sessions also
- *   don't happen (the LLM Host serializes its own queue and the SQLite
- *   write path is fast enough that running them in series is fine for
- *   MVP-scale loads).
- *
- * `priority` is currently always `background`; the v5 contract reserves
- * `maintenance` for deeper consolidation kinds we don't run yet.
+ * - On `session.observed`, fire the per-turn hallucination-indexing
+ *   pipeline immediately for the latest assistant message (no
+ *   debounce). This is fire-and-forget — the orchestrator is not
+ *   waiting on us.
+ * - Same trigger also enqueues a session-summary job, debounced
+ *   against `consolidation.sessionSummaryMinNewTurns`. After a
+ *   summary refresh, identity extractions run for both user and
+ *   persona scopes.
+ * - Activity observers (the sleep/active state machine) are notified
+ *   on every `session.observed` so they can keep `lastActivityAt`
+ *   fresh.
  */
 @Injectable()
 export class ConsolidationScheduler implements OnModuleDestroy {
@@ -61,14 +58,14 @@ export class ConsolidationScheduler implements OnModuleDestroy {
   private readonly queue = new Map<string, QueuedJob>();
   private workerRunning = false;
   private listeners: Array<(event: ConsolidationUpdatedEvent) => void> = [];
+  private activityObservers: ActivityObserver[] = [];
   private destroyed = false;
 
   constructor(
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly summary: SessionSummaryService,
     private readonly identity: IdentityService,
-    private readonly gate: RealityDriftGateService,
-    private readonly audit: RealityDriftAuditService,
+    private readonly index: HallucinationIndexService,
     private readonly db: DatabaseService,
   ) {}
 
@@ -86,15 +83,57 @@ export class ConsolidationScheduler implements OnModuleDestroy {
     };
   }
 
+  onActivity(observer: ActivityObserver): () => void {
+    this.activityObservers.push(observer);
+    return () => {
+      this.activityObservers = this.activityObservers.filter(
+        (o) => o !== observer,
+      );
+    };
+  }
+
   notifyObserved(args: {
     sessionId: string;
     lastSeq: number;
     observedAt: string;
   }): void {
     if (this.destroyed) return;
+
+    for (const obs of this.activityObservers) {
+      try {
+        obs(args.sessionId, args.observedAt);
+      } catch (err) {
+        this.log.warn(
+          `activity observer threw: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    // Per-turn hallucination index — fire immediately, do not block
+    // and do not gate on the summary debounce. The index service
+    // itself no-ops if the latest assistant message is already
+    // indexed.
+    void this.index
+      .indexLatestTurn(args.sessionId)
+      .then((r) => {
+        if (r.status === "indexed") {
+          this.emitUpdated(args.sessionId, "answer.hallucination_index");
+          if (r.auditWritten === true) {
+            this.emitUpdated(args.sessionId, "answer.reality_check");
+          }
+        }
+      })
+      .catch((err: Error) => {
+        this.log.warn(
+          `per-turn index crashed for ${args.sessionId}: ${err.message}`,
+        );
+      });
+
     const shouldRun = this.summary.shouldRun(args.sessionId, args.lastSeq);
     this.log.log(
-      `notifyObserved sessionId=${args.sessionId} lastSeq=${args.lastSeq} shouldRun=${shouldRun}`,
+      `notifyObserved sessionId=${args.sessionId} lastSeq=${args.lastSeq} summary.shouldRun=${shouldRun}`,
     );
     if (!shouldRun) return;
     this.enqueue(args);
@@ -155,50 +194,7 @@ export class ConsolidationScheduler implements OnModuleDestroy {
 
         if (result.status === "updated") {
           this.emitUpdated(job.sessionId, "session.summary");
-
-          // After the rolling session summary refreshes, run identity
-          // extractions for both the user and the persona using that
-          // fresh summary as raw material. These are best-effort: any
-          // failure is logged and skipped without aborting the worker.
           await this.runIdentityExtractions(job.sessionId);
-
-          // Unit C — reality-drift gate (Layer 1 + Layer 2). Unit D
-          // — when the gate marks the turn audit-worthy, run the
-          // spot-check audit pipeline (claim extraction →
-          // search.run → adjudication → corrected_summary → persist).
-          // Both stages are best-effort: failures don't abort the
-          // worker.
-          try {
-            const decision = await this.gate.evaluateLatestTurn(job.sessionId);
-            if (
-              decision &&
-              decision.layer2?.attempted &&
-              decision.layer2.succeeded &&
-              decision.layer2.auditWorthy === true
-            ) {
-              try {
-                const result = await this.audit.auditTurn(
-                  decision,
-                  decision.assistantMessageContent,
-                );
-                if (result.status === "written") {
-                  this.emitUpdated(job.sessionId, "answer.reality_check");
-                }
-              } catch (err) {
-                this.log.warn(
-                  `reality-drift audit crashed for ${job.sessionId}: ${
-                    err instanceof Error ? err.message : String(err)
-                  }`,
-                );
-              }
-            }
-          } catch (err) {
-            this.log.warn(
-              `reality-drift gate crashed for ${job.sessionId}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
-          }
         }
       }
     } finally {
