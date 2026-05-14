@@ -34,7 +34,9 @@ memory; the RAG Engine is the *outward-looking* counterpart.
 | Orchestrator → fragmenter notifications | done | `session.observed` / `session.invalidate` over persistent WS, fire-and-forget |
 | Fragmenter → orchestrator notifications | done | optional `consolidation.updated` |
 | Orchestrator reads fragmenter tables | done | `FragmenterReaderService`, plain SQL on shared SQLite |
-| Fragmented-context block in prompt | partial | injected as a system message; no per-query relevance selection yet — everything active gets dumped |
+| Fragmented-context block in prompt | partial | identity facts always injected; session summary now conditional under prompt-budget rule (Unit J done); per-query relevance selection still pending (Unit I) |
+| Budget-driven prompt assembly | done | Unit J: LLM host computes num_ctx from hardware + model + architecture equations and exposes it; orchestrator caches the budget and rewrites buildAnswerPrompt to walk newest-first up to budget, includes session summary only when raw history would overflow |
+| Per-session token counter | done | sessions.total_token_count column, bumped on each persisted turn |
 | Repeatability-driven decay | done | applies to identity facts; same mechanism will apply to (future) lessons |
 | Reality-drift gate (Layer 1 + 2) | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
 | Reality-drift spot-check + audits | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
