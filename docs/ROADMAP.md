@@ -45,7 +45,7 @@ memory; the RAG Engine is the *outward-looking* counterpart.
 | Appeal pass | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
 | Experience-lesson distillation | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
 | Experience lessons in app-identity prompt block | planned | depends on distillation |
-| `search.run` capability on RAG Engine | planned | new additive v5 message type on `/v5/retrieval` |
+| `search.run` capability on RAG Engine | done | Unit A: additive v5 message type on `/v5/retrieval`; single `search.completed` event, no progress stream |
 | Short-term vs long-term explicit tiering | not started | partially implicit today (summary vs identity) |
 | Cross-session conversation episodes | not started | the bot remembering past conversations, not just past facts; new `fragmenter_conversation_episodes` table |
 | Memory TOC + LLM-driven fetch | not started | replaces "dump all active facts"; bot decides which chapters to read |
@@ -55,15 +55,17 @@ memory; the RAG Engine is the *outward-looking* counterpart.
 
 Ordered. Each unit ships independently. Sequence or pause as needed.
 
-### Unit A — `search.run` on RAG Engine
+### Unit A — `search.run` on RAG Engine — done
 
 Adds a thinner message type on `/v5/retrieval` that takes a search
 query and returns cleaned highlights, skipping the
 evidence-packaging the chat orchestrator gets from
-`retrieve_evidence`.
+`retrieve_evidence`. Single `search.completed` event, no progress
+stream.
 
-- **Touches:** RAG Engine code, v5 contract doc (`apps/rag-engine.md`).
-- **Depends on:** nothing.
+- **Touched:** RAG Engine (`SearchRunService`,
+  `validateSearchRunRequest`, dispatch in `retrieval-stream-ws.ts`).
+- **Depended on:** nothing.
 - **Unblocks:** Units D, E.
 
 ### Unit B — Repeatability-driven decay for identity facts
