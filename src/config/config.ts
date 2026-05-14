@@ -35,6 +35,23 @@ export interface ConsolidationConfig {
    * `core` requires twice this many.
    */
   promotionReinforcementThreshold: number;
+  /**
+   * Unit C: thresholds for the reality-drift Layer-1 structural
+   * pre-filter. A turn is candidate for the Layer-2 LLM gate only
+   * when (no SEARCH ran this turn) AND (length >= minChars) AND
+   * (at least one of the specifics-density counters is above its
+   * per-1000-char floor).
+   */
+  realityDriftGate: {
+    /** Minimum length of the assistant message in characters. */
+    minChars: number;
+    /** Year-like tokens (19xx, 20xx, or Arabic-Indic equivalent) per 1000 chars. */
+    yearTokensPer1kChars: number;
+    /** Digit-adjacent-short-word tokens per 1000 chars. */
+    digitWordTokensPer1kChars: number;
+    /** Quoted substrings in paragraphs without a URL, per 1000 chars. */
+    quotedSubstringsPer1kChars: number;
+  };
 }
 
 export interface ServiceConfig {
@@ -104,5 +121,26 @@ function validate(c: ServiceConfig): void {
     Number.isInteger(c.consolidation?.promotionReinforcementThreshold) &&
       c.consolidation.promotionReinforcementThreshold > 0,
     "consolidation.promotionReinforcementThreshold must be a positive integer",
+  );
+  const gate = c.consolidation?.realityDriftGate;
+  must(gate, "consolidation.realityDriftGate required");
+  must(
+    Number.isInteger(gate?.minChars) && (gate?.minChars ?? 0) > 0,
+    "consolidation.realityDriftGate.minChars must be a positive integer",
+  );
+  must(
+    typeof gate?.yearTokensPer1kChars === "number" &&
+      (gate?.yearTokensPer1kChars ?? -1) >= 0,
+    "consolidation.realityDriftGate.yearTokensPer1kChars must be a non-negative number",
+  );
+  must(
+    typeof gate?.digitWordTokensPer1kChars === "number" &&
+      (gate?.digitWordTokensPer1kChars ?? -1) >= 0,
+    "consolidation.realityDriftGate.digitWordTokensPer1kChars must be a non-negative number",
+  );
+  must(
+    typeof gate?.quotedSubstringsPer1kChars === "number" &&
+      (gate?.quotedSubstringsPer1kChars ?? -1) >= 0,
+    "consolidation.realityDriftGate.quotedSubstringsPer1kChars must be a non-negative number",
   );
 }

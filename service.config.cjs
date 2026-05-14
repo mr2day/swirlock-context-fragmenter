@@ -94,6 +94,25 @@ const env = {
     // a fresh extraction's content matches an existing active
     // row's content (case + whitespace normalised).
     promotionReinforcementThreshold: 3,
+
+    // Unit C: reality-drift Layer-1 structural pre-filter
+    // thresholds. The gate is a candidate for the Layer-2 LLM
+    // decision only when ALL of these hold for the just-finished
+    // assistant turn:
+    //   1. No SEARCH ran for that turn
+    //   2. Message length >= minChars
+    //   3. At least one specifics-density counter clears its
+    //      per-1000-char floor (year tokens OR digit+word tokens
+    //      OR quoted substrings without a co-located URL)
+    // Defaults are deliberately permissive at MVP — we want to see
+    // false positives in the log and tune from there, rather than
+    // miss real hallucinations.
+    realityDriftGate: {
+      minChars: 600,
+      yearTokensPer1kChars: 1.5,
+      digitWordTokensPer1kChars: 2.0,
+      quotedSubstringsPer1kChars: 0.5,
+    },
   },
 };
 

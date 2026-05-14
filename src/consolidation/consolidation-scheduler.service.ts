@@ -3,6 +3,7 @@ import { SERVICE_CONFIG } from "../config/config";
 import type { ServiceConfig } from "../config/config";
 import { DatabaseService } from "../database/database.service";
 import { IdentityService } from "./identity.service";
+import { RealityDriftGateService } from "./reality-drift-gate.service";
 import {
   SessionSummaryService,
   type SessionSummaryRunResult,
@@ -64,6 +65,7 @@ export class ConsolidationScheduler implements OnModuleDestroy {
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly summary: SessionSummaryService,
     private readonly identity: IdentityService,
+    private readonly gate: RealityDriftGateService,
     private readonly db: DatabaseService,
   ) {}
 
@@ -156,6 +158,20 @@ export class ConsolidationScheduler implements OnModuleDestroy {
           // fresh summary as raw material. These are best-effort: any
           // failure is logged and skipped without aborting the worker.
           await this.runIdentityExtractions(job.sessionId);
+
+          // Unit C — reality-drift gate, log-only. Independent of
+          // identity extractions; runs on the same trigger but
+          // only consumes/logs, never writes (no audit table yet).
+          // Best-effort: failures don't abort the worker.
+          try {
+            await this.gate.evaluateLatestTurn(job.sessionId);
+          } catch (err) {
+            this.log.warn(
+              `reality-drift gate crashed for ${job.sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
         }
       }
     } finally {
