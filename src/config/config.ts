@@ -11,6 +11,12 @@ export interface LlmHostConfig {
   timeoutMs: number;
 }
 
+export interface RagEngineConfig {
+  baseUrl: string;
+  callerService: string;
+  timeoutMs: number;
+}
+
 export interface ConsolidationConfig {
   sessionSummaryMinNewTurns: number;
   sessionSummaryMaxRecentMessages: number;
@@ -61,6 +67,7 @@ export interface ServiceConfig {
   bearerToken: string;
   database: DatabaseConfig;
   llmHost: LlmHostConfig;
+  ragEngine: RagEngineConfig;
   consolidation: ConsolidationConfig;
 }
 
@@ -92,6 +99,12 @@ function validate(c: ServiceConfig): void {
   must(c.llmHost?.baseUrl, "llmHost.baseUrl required");
   must(c.llmHost?.callerService, "llmHost.callerService required");
   must(typeof c.llmHost?.timeoutMs === "number", "llmHost.timeoutMs required");
+  must(c.ragEngine?.baseUrl, "ragEngine.baseUrl required");
+  must(c.ragEngine?.callerService, "ragEngine.callerService required");
+  must(
+    typeof c.ragEngine?.timeoutMs === "number",
+    "ragEngine.timeoutMs required",
+  );
   must(
     Number.isInteger(c.consolidation?.sessionSummaryMinNewTurns) &&
       c.consolidation.sessionSummaryMinNewTurns > 0,

@@ -3,6 +3,7 @@ import { SERVICE_CONFIG } from "../config/config";
 import type { ServiceConfig } from "../config/config";
 import { DatabaseService } from "../database/database.service";
 import { IdentityService } from "./identity.service";
+import { RealityDriftAuditService } from "./reality-drift-audit.service";
 import { RealityDriftGateService } from "./reality-drift-gate.service";
 import {
   SessionSummaryService,
@@ -14,7 +15,8 @@ export interface ConsolidationUpdatedEvent {
   consolidationKind:
     | "session.summary"
     | "identity.user"
-    | "identity.app";
+    | "identity.app"
+    | "answer.reality_check";
   occurredAt: string;
 }
 
@@ -66,6 +68,7 @@ export class ConsolidationScheduler implements OnModuleDestroy {
     private readonly summary: SessionSummaryService,
     private readonly identity: IdentityService,
     private readonly gate: RealityDriftGateService,
+    private readonly audit: RealityDriftAuditService,
     private readonly db: DatabaseService,
   ) {}
 
@@ -159,12 +162,36 @@ export class ConsolidationScheduler implements OnModuleDestroy {
           // failure is logged and skipped without aborting the worker.
           await this.runIdentityExtractions(job.sessionId);
 
-          // Unit C — reality-drift gate, log-only. Independent of
-          // identity extractions; runs on the same trigger but
-          // only consumes/logs, never writes (no audit table yet).
-          // Best-effort: failures don't abort the worker.
+          // Unit C — reality-drift gate (Layer 1 + Layer 2). Unit D
+          // — when the gate marks the turn audit-worthy, run the
+          // spot-check audit pipeline (claim extraction →
+          // search.run → adjudication → corrected_summary → persist).
+          // Both stages are best-effort: failures don't abort the
+          // worker.
           try {
-            await this.gate.evaluateLatestTurn(job.sessionId);
+            const decision = await this.gate.evaluateLatestTurn(job.sessionId);
+            if (
+              decision &&
+              decision.layer2?.attempted &&
+              decision.layer2.succeeded &&
+              decision.layer2.auditWorthy === true
+            ) {
+              try {
+                const result = await this.audit.auditTurn(
+                  decision,
+                  decision.assistantMessageContent,
+                );
+                if (result.status === "written") {
+                  this.emitUpdated(job.sessionId, "answer.reality_check");
+                }
+              } catch (err) {
+                this.log.warn(
+                  `reality-drift audit crashed for ${job.sessionId}: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
+              }
+            }
           } catch (err) {
             this.log.warn(
               `reality-drift gate crashed for ${job.sessionId}: ${

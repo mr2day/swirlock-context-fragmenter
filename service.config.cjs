@@ -57,6 +57,17 @@ const env = {
     timeoutMs: 120000,
   },
 
+  // RAG Engine peer. The fragmenter opens a persistent WS to this
+  // endpoint and consumes the thin `search.run` capability for
+  // reality-drift spot-checks. Per v5 contract Q1, the fragmenter
+  // never bundles its own Exa client; all web-search goes through
+  // the RAG Engine.
+  ragEngine: {
+    baseUrl: 'http://127.0.0.1:3001',
+    callerService: 'context-fragmenter',
+    timeoutMs: 60000,
+  },
+
   // Consolidation knobs. Tuned conservatively for the MVP; one
   // consolidation kind exists today (`session.summary`).
   consolidation: {

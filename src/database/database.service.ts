@@ -130,6 +130,35 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
       CREATE INDEX IF NOT EXISTS idx_app_identities_persona
         ON fragmenter_app_identities(persona_name, superseded_at);
+
+      -- Unit D: reality-drift audits. One row per audited assistant
+      -- turn. Forensic record of what was claimed, what was found,
+      -- and the rolled-up verdict. Append-only; consumed by the
+      -- experience-lesson distillation pass (Unit F), never read at
+      -- prompt time.
+      CREATE TABLE IF NOT EXISTS fragmenter_answer_audits (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        assistant_message_id TEXT NOT NULL,
+        user_id TEXT,
+        persona_name TEXT,
+        occurred_at TEXT NOT NULL,
+        audited_at TEXT NOT NULL,
+        markers_triggered TEXT NOT NULL,
+        claims_checked TEXT NOT NULL,
+        turn_verdict TEXT NOT NULL,
+        corrected_summary TEXT,
+        appealed_at TEXT,
+        disputed INTEGER NOT NULL DEFAULT 0,
+        fragmenter_correlation_id TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_answer_audits_session_turn
+        ON fragmenter_answer_audits(session_id, turn_id);
+
+      CREATE INDEX IF NOT EXISTS idx_answer_audits_persona_verdict
+        ON fragmenter_answer_audits(persona_name, turn_verdict, audited_at);
     `);
 
     // Unit B (repeatability-driven decay): each identity row tracks

@@ -41,7 +41,7 @@ memory; the RAG Engine is the *outward-looking* counterpart.
 | total_token_count fast path in prompt assembly | done | When the cumulative session token count plus mandatory fits the budget, buildAnswerPrompt skips per-message tokenisation and pushes all messages raw; slow path only runs on actual overflow or pre-Unit-J sessions |
 | Repeatability-driven decay | done | applies to identity facts; same mechanism will apply to (future) lessons |
 | Reality-drift gate (Layer 1 + 2) | done | Unit C: log-only mode; structural pre-filter + single Utility-LLM JSON decision after each session.summary refresh; observed on real traffic before Unit D wires audits into storage |
-| Reality-drift spot-check + audits | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
+| Reality-drift spot-check + audits | done | Unit D: when gate marks audit_worthy=true, extracts claims, runs search.run per claim, adjudicates, rolls up to `hallucinated`/`suspect`/`clean`, writes `fragmenter_answer_audits` row |
 | Appeal pass | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
 | Experience-lesson distillation | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
 | Experience lessons in app-identity prompt block | planned | depends on distillation |
@@ -103,16 +103,19 @@ until 10–20 more decisions accumulate for principled tuning.
 - **Depended on:** nothing.
 - **Unblocks:** Unit D.
 
-### Unit D — Reality-drift spot-check + audit storage
+### Unit D — Reality-drift spot-check + audit storage — done
 
-For turns the gate marks audit-worthy, call `search.run`, adjudicate
-claim-by-claim, write `fragmenter_answer_audits` rows with verdict
-and (when applicable) corrected summary.
+For turns the gate marks audit-worthy, calls `search.run`,
+adjudicates claim-by-claim, writes `fragmenter_answer_audits` rows
+with verdict and (when applicable) corrected summary.
 
-- **Touches:** new `RealityDriftAuditService`, new
+- **Touched:** new `RealityDriftAuditService`, new `RagEngineService`
+  (persistent WS client to `/v5/retrieval`), new
   `fragmenter_answer_audits` table, new `consolidationKind:
-  answer.reality_check`.
-- **Depends on:** Unit A (`search.run`), Unit C (gate).
+  answer.reality_check` emitted on the consolidation.updated stream.
+  Scheduler now branches on the gate's `auditWorthy` decision and
+  runs the audit synchronously on the maintenance worker.
+- **Depended on:** Unit A (`search.run`), Unit C (gate).
 
 ### Unit E — Appeal pass
 

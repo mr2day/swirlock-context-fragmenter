@@ -37,6 +37,7 @@ export interface RealityDriftGateDecision {
   sessionId: string;
   turnId: string;
   assistantMessageId: string;
+  assistantMessageContent: string;
   layer1: RealityDriftGateLayer1;
   layer2?: RealityDriftGateLayer2;
 }
@@ -106,6 +107,7 @@ export class RealityDriftGateService {
         sessionId,
         turnId: msg.turn_id,
         assistantMessageId: msg.id,
+        assistantMessageContent: msg.content,
         layer1,
       };
     }
@@ -129,6 +131,7 @@ export class RealityDriftGateService {
       sessionId,
       turnId: msg.turn_id,
       assistantMessageId: msg.id,
+      assistantMessageContent: msg.content,
       layer1,
       layer2,
     };
