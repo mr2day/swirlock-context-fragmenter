@@ -159,7 +159,40 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
       CREATE INDEX IF NOT EXISTS idx_answer_audits_persona_verdict
         ON fragmenter_answer_audits(persona_name, turn_verdict, audited_at);
+
+      -- Unit F: behavioural lessons distilled from clusters of
+      -- non-disputed hallucinated/suspect audits. Same importance
+      -- tiering and supersedence shape as identity rows; same
+      -- reinforcement-driven decay mechanism (Unit B). Consumed at
+      -- prompt time by the orchestrator's FragmenterReaderService
+      -- (Unit G).
+      CREATE TABLE IF NOT EXISTS fragmenter_experience_lessons (
+        id TEXT PRIMARY KEY,
+        persona_name TEXT NOT NULL,
+        content TEXT NOT NULL,
+        importance TEXT NOT NULL,
+        source_audit_ids TEXT NOT NULL,
+        generated_at TEXT NOT NULL,
+        last_confirmed_at TEXT,
+        reinforcement_count INTEGER NOT NULL DEFAULT 1,
+        superseded_at TEXT,
+        superseded_by_id TEXT,
+        fragmenter_correlation_id TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_experience_lessons_persona
+        ON fragmenter_experience_lessons(persona_name, superseded_at);
     `);
+
+    // Unit F: a `distilled_at` checkpoint on each audit row tracks
+    // whether the distillation pass has already consumed it.
+    // Audits with distilled_at = NULL are eligible for the next
+    // distillation tick.
+    this.ensureColumn(
+      "fragmenter_answer_audits",
+      "distilled_at",
+      "TEXT",
+    );
 
     // Unit B (repeatability-driven decay): each identity row tracks
     // how many times an extraction has matched it. Reinforcement

@@ -7,6 +7,7 @@ import {
 } from "@nestjs/common";
 import { SERVICE_CONFIG } from "../config/config";
 import type { ServiceConfig } from "../config/config";
+import { ExperienceLessonService } from "./experience-lesson.service";
 import { IdentityService } from "./identity.service";
 import { RealityDriftAppealService } from "./reality-drift-appeal.service";
 
@@ -33,6 +34,7 @@ export class SleepService implements OnModuleInit, OnModuleDestroy {
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly identity: IdentityService,
     private readonly appeal: RealityDriftAppealService,
+    private readonly lessons: ExperienceLessonService,
   ) {}
 
   onModuleInit(): void {
@@ -79,6 +81,28 @@ export class SleepService implements OnModuleInit, OnModuleDestroy {
       } catch (err) {
         this.log.warn(
           `sleep appeal pass crashed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+
+      // Unit F — experience-lesson distillation and decay. Runs
+      // after appeals so disputed audits are excluded. Distillation
+      // is the LLM-driven pass; decay is pure SQL. Best-effort.
+      try {
+        await this.lessons.runDistillationPass();
+      } catch (err) {
+        this.log.warn(
+          `sleep distillation pass crashed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      try {
+        this.lessons.applyDecayPass();
+      } catch (err) {
+        this.log.warn(
+          `sleep lesson decay pass crashed: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );

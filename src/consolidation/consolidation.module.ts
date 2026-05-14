@@ -3,6 +3,7 @@ import { LlmHostModule } from "../llm-host/llm-host.module";
 import { RagEngineModule } from "../rag-engine/rag-engine.module";
 import { BackfillCrawlerService } from "./backfill-crawler.service";
 import { ConsolidationScheduler } from "./consolidation-scheduler.service";
+import { ExperienceLessonService } from "./experience-lesson.service";
 import { IdentityService } from "./identity.service";
 import { RealityDriftAppealService } from "./reality-drift-appeal.service";
 import { RealityDriftAuditService } from "./reality-drift-audit.service";
@@ -18,6 +19,7 @@ import { SleepService } from "./sleep.service";
     RealityDriftGateService,
     RealityDriftAuditService,
     RealityDriftAppealService,
+    ExperienceLessonService,
     ConsolidationScheduler,
     BackfillCrawlerService,
     SleepService,

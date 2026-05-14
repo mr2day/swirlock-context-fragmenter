@@ -43,7 +43,7 @@ memory; the RAG Engine is the *outward-looking* counterpart.
 | Reality-drift gate (Layer 1 + 2) | done | Unit C: log-only mode; structural pre-filter + single Utility-LLM JSON decision after each session.summary refresh; observed on real traffic before Unit D wires audits into storage |
 | Reality-drift spot-check + audits | done | Unit D: when gate marks audit_worthy=true, extracts claims, runs search.run per claim, adjudicates, rolls up to `hallucinated`/`suspect`/`clean`, writes `fragmenter_answer_audits` row |
 | Appeal pass | done | Unit E: sleep-time pass re-adjudicates non-clean claims under adversarial query + framing; flips `disputed=1` when the new rollup is `clean`; each audit appealed at most once |
-| Experience-lesson distillation | planned | [REALITY_DRIFT.md](./REALITY_DRIFT.md) |
+| Experience-lesson distillation | done | Unit F: per-persona sleep-time pass groups non-disputed audits, reinforces matching lessons or proposes new ones, then runs the same reinforcement-driven decay/promotion mechanism as Unit B over `fragmenter_experience_lessons` |
 | Experience lessons in app-identity prompt block | planned | depends on distillation |
 | `search.run` capability on RAG Engine | done | Unit A: additive v5 message type on `/v5/retrieval`; single `search.completed` event, no progress stream |
 | Short-term vs long-term explicit tiering | not started | partially implicit today (summary vs identity) |
@@ -133,15 +133,25 @@ Flips `disputed = true` on audits the appeal contradicts.
   is set unconditionally so no audit is appealed twice.
 - **Depended on:** Unit D.
 
-### Unit F — Experience-lesson distillation + decay
+### Unit F — Experience-lesson distillation + decay — done
 
-Cluster non-disputed `hallucinated`/`suspect` audits → behavioural
+Clusters non-disputed `hallucinated`/`suspect` audits → behavioural
 lessons in `fragmenter_experience_lessons`. Reuses the repeatability
-decay mechanism from Unit B (now generalised). Implements Q4 of
+decay mechanism from Unit B. Implements Q4 of
 [REALITY_DRIFT.md](./REALITY_DRIFT.md).
 
-- **Touches:** new `ExperienceLessonService` + new table.
-- **Depends on:** Unit D, Unit E, Unit B (mechanism).
+- **Touched:** new `ExperienceLessonService` + new
+  `fragmenter_experience_lessons` table + new `distilled_at`
+  checkpoint column on `fragmenter_answer_audits`. `SleepService.tick()`
+  now calls `runDistillationPass()` and `applyDecayPass()` after the
+  appeal pass. Distillation pulls audits per persona where
+  `turn_verdict IN ('hallucinated','suspect') AND disputed = 0 AND
+  appealed_at IS NOT NULL AND distilled_at IS NULL`, asks the
+  Utility LLM to map each audit to existing lessons (reinforcement)
+  or propose new behavioural sentences, then bumps
+  `reinforcement_count` / `last_confirmed_at` and inserts new rows
+  in a single transaction. Decay reuses the Unit B SQL shape.
+- **Depended on:** Unit D, Unit E, Unit B (mechanism).
 
 ### Unit G — Lessons in the orchestrator prompt
 
