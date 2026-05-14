@@ -44,7 +44,7 @@ memory; the RAG Engine is the *outward-looking* counterpart.
 | Reality-drift spot-check + audits | done | Unit D: when gate marks audit_worthy=true, extracts claims, runs search.run per claim, adjudicates, rolls up to `hallucinated`/`suspect`/`clean`, writes `fragmenter_answer_audits` row |
 | Appeal pass | done | Unit E: sleep-time pass re-adjudicates non-clean claims under adversarial query + framing; flips `disputed=1` when the new rollup is `clean`; each audit appealed at most once |
 | Experience-lesson distillation | done | Unit F: per-persona sleep-time pass groups non-disputed audits, reinforces matching lessons or proposes new ones, then runs the same reinforcement-driven decay/promotion mechanism as Unit B over `fragmenter_experience_lessons` |
-| Experience lessons in app-identity prompt block | planned | depends on distillation |
+| Experience lessons in app-identity prompt block | done | Unit G: orchestrator's `FragmenterReaderService` reads active lessons; they render as `[lesson, tier]` entries inside the answer-round identity block AND as a "Lessons from past mistakes" section in the classifier round's system message, so the SEARCH/DIRECT decision is informed |
 | `search.run` capability on RAG Engine | done | Unit A: additive v5 message type on `/v5/retrieval`; single `search.completed` event, no progress stream |
 | Short-term vs long-term explicit tiering | not started | partially implicit today (summary vs identity) |
 | Cross-session conversation episodes | not started | the bot remembering past conversations, not just past facts; new `fragmenter_conversation_episodes` table |
@@ -153,16 +153,22 @@ decay mechanism from Unit B. Implements Q4 of
   in a single transaction. Decay reuses the Unit B SQL shape.
 - **Depended on:** Unit D, Unit E, Unit B (mechanism).
 
-### Unit G — Lessons in the orchestrator prompt
+### Unit G — Lessons in the orchestrator prompt — done
 
 `FragmenterReaderService` reads experience lessons; they appear in
-the app-identity block as `[lesson, tier]` entries. This is what
-closes the loop — the orchestrator's classifier sees its own
-lessons and starts choosing SEARCH on patterns it learned to fear.
+the app-identity block as `[lesson, tier]` entries on the answer
+round AND as a separate "Lessons from past mistakes" section in
+the classifier round's system message. The loop is closed: the
+orchestrator's classifier sees its own lessons one round earlier
+and can choose SEARCH on patterns it learned to fear.
 
-- **Touches:** orchestrator (`FragmenterReaderService`,
-  `buildAnswerPrompt`).
-- **Depends on:** Unit F (table populated).
+- **Touched:** orchestrator's `FragmenterReaderService`
+  (`loadExperienceLessons`, `experienceLessons` field on
+  `FragmentedContext`), `buildAssessmentPrompt` and
+  `buildAnswerPrompt` in `reverse-control-prompts.ts`,
+  `reverse-control-flow.service.ts` (fragmenter context loaded once
+  per turn, used by both rounds).
+- **Depended on:** Unit F (table populated).
 
 ### Unit H — Cross-session conversation episodes
 
