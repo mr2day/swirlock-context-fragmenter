@@ -1,6 +1,8 @@
 import { Inject, Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { SERVICE_CONFIG } from "../config/config";
 import type { ServiceConfig } from "../config/config";
+import { DatabaseService } from "../database/database.service";
+import { IdentityService } from "./identity.service";
 import {
   SessionSummaryService,
   type SessionSummaryRunResult,
@@ -8,8 +10,20 @@ import {
 
 export interface ConsolidationUpdatedEvent {
   sessionId: string;
-  consolidationKind: "session.summary";
+  consolidationKind:
+    | "session.summary"
+    | "identity.user"
+    | "identity.app";
   occurredAt: string;
+}
+
+interface SessionMetaRow {
+  user_id: string | null;
+  persona_name: string | null;
+}
+
+interface SummaryTextRow {
+  summary: string;
 }
 
 interface QueuedJob {
@@ -49,6 +63,8 @@ export class ConsolidationScheduler implements OnModuleDestroy {
   constructor(
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly summary: SessionSummaryService,
+    private readonly identity: IdentityService,
+    private readonly db: DatabaseService,
   ) {}
 
   onModuleDestroy(): void {
@@ -133,26 +149,114 @@ export class ConsolidationScheduler implements OnModuleDestroy {
         }
 
         if (result.status === "updated") {
-          const event: ConsolidationUpdatedEvent = {
-            sessionId: job.sessionId,
-            consolidationKind: "session.summary",
-            occurredAt: new Date().toISOString(),
-          };
-          for (const listener of this.listeners) {
-            try {
-              listener(event);
-            } catch (err) {
-              this.log.warn(
-                `consolidation.updated listener threw: ${
-                  err instanceof Error ? err.message : String(err)
-                }`,
-              );
-            }
-          }
+          this.emitUpdated(job.sessionId, "session.summary");
+
+          // After the rolling session summary refreshes, run identity
+          // extractions for both the user and the persona using that
+          // fresh summary as raw material. These are best-effort: any
+          // failure is logged and skipped without aborting the worker.
+          await this.runIdentityExtractions(job.sessionId);
         }
       }
     } finally {
       this.workerRunning = false;
     }
+  }
+
+  private async runIdentityExtractions(sessionId: string): Promise<void> {
+    const meta = this.loadSessionMeta(sessionId);
+    if (!meta) {
+      this.log.warn(
+        `identity extractions skipped for ${sessionId}: session row not found`,
+      );
+      return;
+    }
+    const summaryText = this.loadSummaryText(sessionId);
+    if (!summaryText) {
+      this.log.warn(
+        `identity extractions skipped for ${sessionId}: no summary text in DB`,
+      );
+      return;
+    }
+
+    if (meta.user_id) {
+      try {
+        const r = await this.identity.extract({
+          scope: "user",
+          key: meta.user_id,
+          sessionSummary: summaryText,
+          sourceSessionId: sessionId,
+        });
+        if (r.status === "updated") {
+          this.emitUpdated(sessionId, "identity.user");
+        }
+      } catch (err) {
+        this.log.warn(
+          `identity.user extraction crashed for ${sessionId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    if (meta.persona_name) {
+      try {
+        const r = await this.identity.extract({
+          scope: "app",
+          key: meta.persona_name,
+          sessionSummary: summaryText,
+          sourceSessionId: sessionId,
+        });
+        if (r.status === "updated") {
+          this.emitUpdated(sessionId, "identity.app");
+        }
+      } catch (err) {
+        this.log.warn(
+          `identity.app extraction crashed for ${sessionId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
+  private emitUpdated(
+    sessionId: string,
+    kind: ConsolidationUpdatedEvent["consolidationKind"],
+  ): void {
+    const event: ConsolidationUpdatedEvent = {
+      sessionId,
+      consolidationKind: kind,
+      occurredAt: new Date().toISOString(),
+    };
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch (err) {
+        this.log.warn(
+          `consolidation.updated listener threw: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
+  private loadSessionMeta(sessionId: string): SessionMetaRow | null {
+    const row = this.db.connection
+      .prepare(
+        `SELECT user_id, persona_name FROM sessions WHERE id = ?`,
+      )
+      .get(sessionId) as SessionMetaRow | undefined;
+    return row ?? null;
+  }
+
+  private loadSummaryText(sessionId: string): string | null {
+    const row = this.db.connection
+      .prepare(
+        `SELECT summary FROM fragmenter_session_summaries WHERE session_id = ?`,
+      )
+      .get(sessionId) as SummaryTextRow | undefined;
+    return row?.summary ?? null;
   }
 }

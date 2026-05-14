@@ -15,6 +15,11 @@ export interface ConsolidationConfig {
   sessionSummaryMinNewTurns: number;
   sessionSummaryMaxRecentMessages: number;
   maxQueueDepth: number;
+  /**
+   * How often the identity-consolidation ("sleep") job runs, in
+   * milliseconds. Set to 0 to disable.
+   */
+  sleepIntervalMs: number;
 }
 
 export interface ServiceConfig {
@@ -69,5 +74,10 @@ function validate(c: ServiceConfig): void {
     Number.isInteger(c.consolidation?.maxQueueDepth) &&
       c.consolidation.maxQueueDepth > 0,
     "consolidation.maxQueueDepth must be a positive integer",
+  );
+  must(
+    Number.isInteger(c.consolidation?.sleepIntervalMs) &&
+      c.consolidation.sleepIntervalMs >= 0,
+    "consolidation.sleepIntervalMs must be a non-negative integer",
   );
 }

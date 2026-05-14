@@ -74,6 +74,12 @@ const env = {
     // Hard cap on outstanding consolidation jobs queued in memory.
     // Older jobs for the same sessionId are coalesced.
     maxQueueDepth: 256,
+
+    // How often the identity-consolidation ("sleep") job runs, in
+    // milliseconds. The job walks all active user_identities and
+    // app_identities and asks the LLM to merge/dedupe/re-tier them.
+    // Default: every 30 minutes. Set to 0 to disable.
+    sleepIntervalMs: 30 * 60 * 1000,
   },
 };
 

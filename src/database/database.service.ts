@@ -88,6 +88,48 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
       CREATE INDEX IF NOT EXISTS idx_fragmenter_runs_session
         ON fragmenter_consolidation_runs(session_id, started_at);
+
+      -- Durable facts the conversation has established about the user,
+      -- scoped per user_id (matches orchestrator's sessions.user_id).
+      -- Importance: 'core' (identity-defining), 'important' (recurring),
+      -- 'incidental' (one-off mention worth remembering). Sleep can
+      -- supersede old rows with merged/re-tiered ones; superseded rows
+      -- stay in the table for traceability.
+      CREATE TABLE IF NOT EXISTS fragmenter_user_identities (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        importance TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_session_id TEXT,
+        generated_at TEXT NOT NULL,
+        last_confirmed_at TEXT,
+        superseded_at TEXT,
+        superseded_by_id TEXT,
+        fragmenter_correlation_id TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_user_identities_user
+        ON fragmenter_user_identities(user_id, superseded_at);
+
+      -- Durable facts the persona has established about itself across
+      -- sessions, scoped per persona_name. Same shape as user identities.
+      CREATE TABLE IF NOT EXISTS fragmenter_app_identities (
+        id TEXT PRIMARY KEY,
+        persona_name TEXT NOT NULL,
+        content TEXT NOT NULL,
+        importance TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_session_id TEXT,
+        generated_at TEXT NOT NULL,
+        last_confirmed_at TEXT,
+        superseded_at TEXT,
+        superseded_by_id TEXT,
+        fragmenter_correlation_id TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_app_identities_persona
+        ON fragmenter_app_identities(persona_name, superseded_at);
     `);
   }
 }
