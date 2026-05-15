@@ -9,7 +9,13 @@ import {
 
 const MAX_CLAIMS = 5;
 const EVIDENCE_HIGHLIGHT_MAX_CHARS = 900;
-const EXTRACT_LIMIT_PER_CLAIM = 2;
+// Pulled up from 2 to 5 so the adjudicator can see whether a claim
+// is supported by the WEIGHT of sources, not just one outlier. The
+// Dubois-vs-Itauma incident (2026-05-15) showed the previous
+// single-source-supportive verification was getting fooled by
+// content-farm / hallucinated articles that happened to match the
+// bot's fabricated narrative.
+const EXTRACT_LIMIT_PER_CLAIM = 5;
 
 export interface AuditTurnRef {
   sessionId: string;
@@ -262,11 +268,17 @@ export class RealityDriftAuditService {
       };
     }
 
+    // Deliberately omit the URL from the prose shown to the
+    // adjudicator. URLs are noisy anchor signal — they contain
+    // dates and slugs the LLM tends to lift verbatim, sometimes in
+    // preference to the actual article body. The adjudicator decides
+    // on the prose alone; the URL is kept in `retrievedEvidenceUrl`
+    // on the persisted ClaimAudit row for forensic / citation use.
     const evidenceBlocks = searchResults
       .slice(0, EXTRACT_LIMIT_PER_CLAIM)
       .map(
         (r, i) =>
-          `[#${i + 1}] ${r.title}\n${r.url}${
+          `[Source ${i + 1}] ${r.title}${
             r.publishedAt ? ` (published ${r.publishedAt})` : ""
           }\n${this.truncateHighlight(r.highlight)}`,
       )
@@ -455,21 +467,25 @@ function buildClaimExtractionSystemPrompt(): string {
 
 function buildAdjudicationSystemPrompt(): string {
   return [
-    "You are adjudicating a single factual claim against retrieved web evidence.",
+    "You are adjudicating a single factual claim against retrieved web evidence. You will be given the claim and several independent sources. Your job is to read the sources as a group and decide how the WEIGHT OF EVIDENCE relates to the claim.",
     "",
     "Output STRICT JSON only — no prose, no code fences. Schema:",
-    '{"verdict": "verified" | "contradicted" | "partial" | "unverifiable", "rationale": <short string>}',
+    '{"agree_count": <integer>, "contradict_count": <integer>, "irrelevant_count": <integer>, "verdict": "verified" | "contradicted" | "partial" | "unverifiable", "rationale": <short string>}',
     "",
-    "Verdict definitions:",
-    "- `verified`: the evidence clearly supports the claim. Specific elements (names, dates, numbers, events) match.",
-    "- `contradicted`: the evidence clearly disagrees with the claim. Specific elements visibly conflict.",
-    "- `partial`: some elements of the claim are supported, others are contradicted or absent.",
-    "- `unverifiable`: the retrieved evidence is irrelevant, off-topic, or insufficient to support or contradict the claim. This is your honest-mode answer when the search did not surface a real check.",
+    "Step 1 — count each source:",
+    "- `agree_count`: sources whose prose supports the specific elements of the claim (names, dates, numbers, events).",
+    "- `contradict_count`: sources whose prose visibly conflicts with the claim — different outcome, different date, says the event has not happened, etc.",
+    "- `irrelevant_count`: sources that are off-topic or too vague to count either way.",
     "",
-    "Rules:",
-    "- Be honest. If the evidence is weak or irrelevant, say `unverifiable` — do not fabricate support.",
-    "- `rationale` is one sentence (≤ 25 words) explaining the verdict.",
-    "- Answer in English regardless of the claim or evidence language.",
+    "Step 2 — derive the verdict by the WEIGHT of agreement, not by whether any one source supports the claim:",
+    "- `verified`: a clear majority of relevant sources agree (agree_count > contradict_count AND agree_count >= 2). One agreeing source against many that contradict is NOT enough.",
+    "- `contradicted`: a clear majority of relevant sources disagree (contradict_count > agree_count AND contradict_count >= 2). This is the right verdict when most sources say the event did not happen, has a different outcome, or has a different date — even if one outlier source claims otherwise.",
+    "- `partial`: relevant sources split roughly evenly, or each source supports some elements and contradicts others.",
+    "- `unverifiable`: relevant_count <= 1, or all sources are vague / off-topic / insufficient. This is your honest-mode answer when the search did not surface a real check.",
+    "",
+    "Important: do NOT trust a single supportive source against multiple contradicting ones. A content-farm article or a hallucinated news page CAN match a fabricated claim. Trust the weight of consensus, not the presence of one match.",
+    "",
+    "`rationale` is one sentence (≤ 30 words) summarising the source counts and the resulting verdict. Answer in English regardless of the source language.",
   ].join("\n");
 }
 

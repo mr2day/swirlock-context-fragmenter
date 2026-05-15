@@ -12,7 +12,11 @@ import type {
   TurnVerdict,
 } from "./reality-drift-audit.service";
 
-const EXTRACT_LIMIT_PER_APPEAL = 2;
+// Pulled up from 2 to 5 so the adversarial adjudicator sees the
+// weight of evidence too, not just one or two cherry-picked
+// supporting snippets. Same reasoning as the audit's bump (see
+// RealityDriftAuditService).
+const EXTRACT_LIMIT_PER_APPEAL = 5;
 
 interface OutstandingAuditRow {
   id: string;
@@ -232,11 +236,13 @@ export class RealityDriftAppealService {
     results: SearchRunResult[],
     appealCorrelationId: string,
   ): Promise<{ verdict: ClaimVerdict; rationale: string }> {
+    // URLs are deliberately omitted from the adjudicator's view
+    // (same reasoning as in RealityDriftAuditService).
     const evidenceBlocks = results
       .slice(0, EXTRACT_LIMIT_PER_APPEAL)
       .map(
         (r, i) =>
-          `[#${i + 1}] ${r.title}\n${r.url}${
+          `[Source ${i + 1}] ${r.title}${
             r.publishedAt ? ` (published ${r.publishedAt})` : ""
           }\n${this.truncateHighlight(r.highlight)}`,
       )
